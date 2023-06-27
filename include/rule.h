@@ -645,6 +645,7 @@ enum cmd_obj {
 	CMD_OBJ_FLOWTABLE,
 	CMD_OBJ_FLOWTABLES,
 	CMD_OBJ_CT_TIMEOUT,
+	CMD_OBJ_CT_TIMEOUTS,
 	CMD_OBJ_SECMARK,
 	CMD_OBJ_SECMARKS,
 	CMD_OBJ_CT_EXPECT,
@@ -785,7 +786,7 @@ struct timeout_protocol {
 	uint32_t *dflt_timeout;
 };
 
-extern struct timeout_protocol timeout_protocol[IPPROTO_MAX];
+extern struct timeout_protocol timeout_protocol[UINT8_MAX + 1];
 extern int timeout_str2num(uint16_t l4proto, struct timeout_state *ts);
 
 #endif /* NFTABLES_RULE_H */

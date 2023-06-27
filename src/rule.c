@@ -76,7 +76,7 @@ static uint32_t udp_dflt_timeout[] = {
 	[NFTNL_CTTIMEOUT_UDP_REPLIED]		= 120,
 };
 
-struct timeout_protocol timeout_protocol[IPPROTO_MAX] = {
+struct timeout_protocol timeout_protocol[UINT8_MAX + 1] = {
 	[IPPROTO_TCP]	= {
 		.array_size	= NFTNL_CTTIMEOUT_TCP_MAX,
 		.state_to_name	= tcp_state_to_name,
@@ -1574,11 +1574,6 @@ static int do_list_table(struct netlink_ctx *ctx, struct table *table)
 
 static int do_list_sets(struct netlink_ctx *ctx, struct cmd *cmd)
 {
-	struct print_fmt_options opts = {
-		.tab		= "\t",
-		.nl		= "\n",
-		.stmt_separator	= "\n",
-	};
 	struct table *table;
 	struct set *set;
 
@@ -1601,8 +1596,7 @@ static int do_list_sets(struct netlink_ctx *ctx, struct cmd *cmd)
 			if (cmd->obj == CMD_OBJ_MAPS &&
 			    !map_is_literal(set->flags))
 				continue;
-			set_print_declaration(set, &opts, &ctx->nft->output);
-			nft_print(&ctx->nft->output, "%s}%s", opts.tab, opts.nl);
+			set_print(set, &ctx->nft->output);
 		}
 
 		nft_print(&ctx->nft->output, "}\n");
@@ -2357,6 +2351,7 @@ static int do_command_list(struct netlink_ctx *ctx, struct cmd *cmd)
 	case CMD_OBJ_CT_HELPERS:
 		return do_list_obj(ctx, cmd, NFT_OBJECT_CT_HELPER);
 	case CMD_OBJ_CT_TIMEOUT:
+	case CMD_OBJ_CT_TIMEOUTS:
 		return do_list_obj(ctx, cmd, NFT_OBJECT_CT_TIMEOUT);
 	case CMD_OBJ_CT_EXPECT:
 		return do_list_obj(ctx, cmd, NFT_OBJECT_CT_EXPECT);

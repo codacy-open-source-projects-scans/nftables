@@ -541,6 +541,27 @@ static const struct proto_desc *proto_lookup_byname(const char *name)
 		&proto_dccp,
 		&proto_sctp,
 		&proto_th,
+		&proto_vxlan,
+		&proto_gre,
+		&proto_gretap,
+		&proto_geneve,
+	};
+	unsigned int i;
+
+	for (i = 0; i < array_size(proto_tbl); i++) {
+		if (!strcmp(proto_tbl[i]->name, name))
+			return proto_tbl[i];
+	}
+	return NULL;
+}
+
+static const struct proto_desc *inner_proto_lookup_byname(const char *name)
+{
+	const struct proto_desc *proto_tbl[] = {
+		&proto_geneve,
+		&proto_gre,
+		&proto_gretap,
+		&proto_vxlan,
 	};
 	unsigned int i;
 
@@ -554,7 +575,7 @@ static const struct proto_desc *proto_lookup_byname(const char *name)
 static struct expr *json_parse_payload_expr(struct json_ctx *ctx,
 					    const char *type, json_t *root)
 {
-	const char *protocol, *field, *base;
+	const char *tunnel, *protocol, *field, *base;
 	int offset, len, val;
 	struct expr *expr;
 
@@ -576,6 +597,33 @@ static struct expr *json_parse_payload_expr(struct json_ctx *ctx,
 		payload_init_raw(expr, val, offset, len);
 		expr->byteorder		= BYTEORDER_BIG_ENDIAN;
 		expr->payload.is_raw	= true;
+		return expr;
+	} else if (!json_unpack(root, "{s:s, s:s, s:s}",
+				"tunnel", &tunnel, "protocol", &protocol, "field", &field)) {
+		const struct proto_desc *proto = proto_lookup_byname(protocol);
+		const struct proto_desc *inner_proto = inner_proto_lookup_byname(tunnel);
+
+		if (!inner_proto) {
+			json_error(ctx, "Unknown payload tunnel protocol '%s'.",
+				   tunnel);
+			return NULL;
+		}
+		if (!proto) {
+			json_error(ctx, "Unknown payload protocol '%s'.",
+				   protocol);
+			return NULL;
+		}
+		if (json_parse_payload_field(proto, field, &val)) {
+			json_error(ctx, "Unknown %s field '%s'.",
+				   protocol, field);
+			return NULL;
+		}
+		expr = payload_expr_alloc(int_loc, proto, val);
+		expr->payload.inner_desc = inner_proto;
+
+		if (proto == &proto_th)
+			expr->payload.is_raw = true;
+
 		return expr;
 	} else if (!json_unpack(root, "{s:s, s:s}",
 				"protocol", &protocol, "field", &field)) {
@@ -759,7 +807,7 @@ static struct expr *json_parse_sctp_chunk_expr(struct json_ctx *ctx,
 static struct expr *json_parse_dccp_option_expr(struct json_ctx *ctx,
 						const char *type, json_t *root)
 {
-	const int opt_type;
+	int opt_type;
 
 	if (json_unpack_err(ctx, root, "{s:i}", "type", &opt_type))
 		return NULL;
@@ -1729,6 +1777,27 @@ static struct stmt *json_parse_counter_stmt(struct json_ctx *ctx,
 		return NULL;
 	}
 	return stmt;
+}
+
+static struct stmt *json_parse_last_stmt(struct json_ctx *ctx,
+					 const char *key, json_t *value)
+{
+	struct stmt *stmt;
+	int64_t used;
+
+	if (json_is_null(value))
+		return last_stmt_alloc(int_loc);
+
+	if (!json_unpack(value, "{s:I}", "used", &used)) {
+		stmt = last_stmt_alloc(int_loc);
+		if (used != -1) {
+			stmt->last.used = used;
+			stmt->last.set = 1;
+		}
+		return stmt;
+	}
+
+	return NULL;
 }
 
 static struct stmt *json_parse_verdict_stmt(struct json_ctx *ctx,
@@ -2747,6 +2816,7 @@ static struct stmt *json_parse_stmt(struct json_ctx *ctx, json_t *root)
 		{ "counter", json_parse_counter_stmt },
 		{ "mangle", json_parse_mangle_stmt },
 		{ "quota", json_parse_quota_stmt },
+		{ "last", json_parse_last_stmt },
 		{ "limit", json_parse_limit_stmt },
 		{ "flow", json_parse_flow_offload_stmt },
 		{ "fwd", json_parse_fwd_stmt },

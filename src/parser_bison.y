@@ -80,12 +80,11 @@ static int open_scope(struct parser_state *state, struct scope *scope)
 
 static void close_scope(struct parser_state *state)
 {
-	if (state->scope_err) {
+	if (state->scope_err || state->scope == 0) {
 		state->scope_err = false;
 		return;
 	}
 
-	assert(state->scope > 0);
 	state->scope--;
 }
 
@@ -143,6 +142,33 @@ static bool already_set(const void *attr, const struct location *loc,
 	erec_queue(error(loc, "You can only specify this once. This statement is duplicated."),
 		   state->msgs);
 	return true;
+}
+
+static struct expr *ifname_expr_alloc(const struct location *location,
+				      struct list_head *queue,
+				      const char *name)
+{
+	unsigned int length = strlen(name);
+	struct expr *expr;
+
+	if (length == 0) {
+		xfree(name);
+		erec_queue(error(location, "empty interface name"), queue);
+		return NULL;
+	}
+
+	if (length > 16) {
+		xfree(name);
+		erec_queue(error(location, "interface name too long"), queue);
+		return NULL;
+	}
+
+	expr = constant_expr_alloc(location, &ifname_type, BYTEORDER_HOST_ENDIAN,
+				   length * BITS_PER_BYTE, name);
+
+	xfree(name);
+
+	return expr;
 }
 
 #define YYLLOC_DEFAULT(Current, Rhs, N)	location_update(&Current, Rhs, N)
@@ -2354,17 +2380,21 @@ flowtable_list_expr	:	flowtable_expr_member
 
 flowtable_expr_member	:	QUOTED_STRING
 			{
-				$$ = constant_expr_alloc(&@$, &string_type,
-							 BYTEORDER_HOST_ENDIAN,
-							 strlen($1) * BITS_PER_BYTE, $1);
-				xfree($1);
+				struct expr *expr = ifname_expr_alloc(&@$, state->msgs, $1);
+
+				if (!expr)
+					YYERROR;
+
+				$$ = expr;
 			}
 			|	STRING
 			{
-				$$ = constant_expr_alloc(&@$, &string_type,
-							 BYTEORDER_HOST_ENDIAN,
-							 strlen($1) * BITS_PER_BYTE, $1);
-				xfree($1);
+				struct expr *expr = ifname_expr_alloc(&@$, state->msgs, $1);
+
+				if (!expr)
+					YYERROR;
+
+				$$ = expr;
 			}
 			|	variable_expr
 			{
@@ -2665,12 +2695,11 @@ int_num			:	NUM			{ $$ = $1; }
 
 dev_spec		:	DEVICE	string
 			{
-				struct expr *expr;
+				struct expr *expr = ifname_expr_alloc(&@$, state->msgs, $2);
 
-				expr = constant_expr_alloc(&@$, &string_type,
-							   BYTEORDER_HOST_ENDIAN,
-							   strlen($2) * BITS_PER_BYTE, $2);
-				xfree($2);
+				if (!expr)
+					YYERROR;
+
 				$$ = compound_expr_alloc(&@$, EXPR_LIST);
 				compound_expr_add($$, expr);
 
@@ -4728,7 +4757,7 @@ ct_obj_type		:	HELPER		{ $$ = NFT_OBJECT_CT_HELPER; }
 			;
 
 ct_cmd_type		:	HELPERS		{ $$ = CMD_OBJ_CT_HELPERS; }
-			|	TIMEOUT		{ $$ = CMD_OBJ_CT_TIMEOUT; }
+			|	TIMEOUT		{ $$ = CMD_OBJ_CT_TIMEOUTS; }
 			|	EXPECTATION	{ $$ = CMD_OBJ_CT_EXPECT; }
 			;
 
