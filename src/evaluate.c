@@ -508,6 +508,7 @@ static void expr_evaluate_bits(struct eval_ctx *ctx, struct expr **exprp)
 {
 	struct expr *expr = *exprp, *and, *mask, *rshift, *off;
 	unsigned masklen, len = expr->len, extra_len = 0;
+	enum byteorder byteorder;
 	uint8_t shift;
 	mpz_t bitmask;
 
@@ -542,6 +543,15 @@ static void expr_evaluate_bits(struct eval_ctx *ctx, struct expr **exprp)
 	and->len	= masklen;
 
 	if (shift) {
+		if (ctx->stmt_len > 0 && div_round_up(masklen, BITS_PER_BYTE) > 1) {
+			int op = byteorder_conversion_op(expr, BYTEORDER_HOST_ENDIAN);
+			and = unary_expr_alloc(&expr->location, op, and);
+			and->len = masklen;
+			byteorder = BYTEORDER_HOST_ENDIAN;
+		} else {
+			byteorder = expr->byteorder;
+		}
+
 		off = constant_expr_alloc(&expr->location,
 					  expr_basetype(expr),
 					  BYTEORDER_HOST_ENDIAN,
@@ -549,7 +559,7 @@ static void expr_evaluate_bits(struct eval_ctx *ctx, struct expr **exprp)
 
 		rshift = binop_expr_alloc(&expr->location, OP_RSHIFT, and, off);
 		rshift->dtype		= expr->dtype;
-		rshift->byteorder	= expr->byteorder;
+		rshift->byteorder	= byteorder;
 		rshift->len		= masklen;
 
 		*exprp = rshift;
@@ -5346,21 +5356,7 @@ static int cmd_evaluate_list(struct eval_ctx *ctx, struct cmd *cmd)
 
 		return 0;
 	case CMD_OBJ_SET:
-		table = table_cache_find(&ctx->nft->cache.table_cache,
-					 cmd->handle.table.name,
-					 cmd->handle.family);
-		if (!table)
-			return table_not_found(ctx);
-
-		set = set_cache_find(table, cmd->handle.set.name);
-		if (set == NULL)
-			return set_not_found(ctx, &ctx->cmd->handle.set.location,
-					     ctx->cmd->handle.set.name);
-		else if (!set_is_literal(set->flags))
-			return cmd_error(ctx, &ctx->cmd->handle.set.location,
-					 "%s", strerror(ENOENT));
-
-		return 0;
+	case CMD_OBJ_MAP:
 	case CMD_OBJ_METER:
 		table = table_cache_find(&ctx->nft->cache.table_cache,
 					 cmd->handle.table.name,
@@ -5372,26 +5368,13 @@ static int cmd_evaluate_list(struct eval_ctx *ctx, struct cmd *cmd)
 		if (set == NULL)
 			return set_not_found(ctx, &ctx->cmd->handle.set.location,
 					     ctx->cmd->handle.set.name);
-		else if (!set_is_meter(set->flags))
+		if ((cmd->obj == CMD_OBJ_SET && !set_is_literal(set->flags)) ||
+		    (cmd->obj == CMD_OBJ_MAP && !map_is_literal(set->flags)) ||
+		    (cmd->obj == CMD_OBJ_METER && !set_is_meter(set->flags)))
 			return cmd_error(ctx, &ctx->cmd->handle.set.location,
 					 "%s", strerror(ENOENT));
 
-		return 0;
-	case CMD_OBJ_MAP:
-		table = table_cache_find(&ctx->nft->cache.table_cache,
-					 cmd->handle.table.name,
-					 cmd->handle.family);
-		if (!table)
-			return table_not_found(ctx);
-
-		set = set_cache_find(table, cmd->handle.set.name);
-		if (set == NULL)
-			return set_not_found(ctx, &ctx->cmd->handle.set.location,
-					     ctx->cmd->handle.set.name);
-		else if (!map_is_literal(set->flags))
-			return cmd_error(ctx, &ctx->cmd->handle.set.location,
-					 "%s", strerror(ENOENT));
-
+		cmd->set = set_get(set);
 		return 0;
 	case CMD_OBJ_CHAIN:
 		table = table_cache_find(&ctx->nft->cache.table_cache,
@@ -5487,6 +5470,11 @@ static int cmd_evaluate_reset(struct eval_ctx *ctx, struct cmd *cmd)
 			return table_not_found(ctx);
 
 		return 0;
+	case CMD_OBJ_ELEMENTS:
+		return setelem_evaluate(ctx, cmd);
+	case CMD_OBJ_SET:
+	case CMD_OBJ_MAP:
+		return cmd_evaluate_list(ctx, cmd);
 	default:
 		BUG("invalid command object type %u\n", cmd->obj);
 	}
