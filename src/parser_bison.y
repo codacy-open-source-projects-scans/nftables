@@ -673,7 +673,7 @@ int nft_lex(void *, void *, void *);
 %type <string>			identifier type_identifier string comment_spec
 %destructor { xfree($$); }	identifier type_identifier string comment_spec
 
-%type <val>			time_spec quota_used
+%type <val>			time_spec time_spec_or_num_s quota_used
 
 %type <expr>			data_type_expr data_type_atom_expr
 %destructor { expr_free($$); }  data_type_expr data_type_atom_expr
@@ -727,7 +727,7 @@ int nft_lex(void *, void *, void *);
 
 %type <set>			map_block_alloc map_block
 %destructor { set_free($$); }	map_block_alloc
-%type <val>			map_block_obj_type
+%type <val>			map_block_obj_type map_block_data_interval
 
 %type <flowtable>		flowtable_block_alloc flowtable_block
 %destructor { flowtable_free($$); }	flowtable_block_alloc
@@ -2225,6 +2225,10 @@ map_block_obj_type	:	COUNTER	close_scope_counter { $$ = NFT_OBJECT_COUNTER; }
 			|	SYNPROXY close_scope_synproxy { $$ = NFT_OBJECT_SYNPROXY; }
 			;
 
+map_block_data_interval :	INTERVAL { $$ = EXPR_F_INTERVAL; }
+			|	{ $$ = 0; }
+			;
+
 map_block		:	/* empty */	{ $$ = $<set>-1; }
 			|	map_block	common_block
 			|	map_block	stmt_separator
@@ -2234,22 +2238,12 @@ map_block		:	/* empty */	{ $$ = $<set>-1; }
 				$$ = $1;
 			}
 			|	map_block	TYPE
-						data_type_expr	COLON	data_type_expr
-						stmt_separator	close_scope_type
-			{
-				$1->key = $3;
-				$1->data = $5;
-
-				$1->flags |= NFT_SET_MAP;
-				$$ = $1;
-			}
-			|	map_block	TYPE
-						data_type_expr	COLON	INTERVAL	data_type_expr
+						data_type_expr	COLON	map_block_data_interval data_type_expr
 						stmt_separator	close_scope_type
 			{
 				$1->key = $3;
 				$1->data = $6;
-				$1->data->flags |= EXPR_F_INTERVAL;
+				$1->data->flags |= $5;
 
 				$1->flags |= NFT_SET_MAP;
 				$$ = $1;
@@ -2788,6 +2782,11 @@ time_spec		:	STRING
 				}
 				$$ = res;
 			}
+			;
+
+/* compatibility kludge to allow either 60, 60s, 1m, ... */
+time_spec_or_num_s	:	NUM
+			|	time_spec { $$ = $1 / 1000u; }
 			;
 
 family_spec		:	/* empty */		{ $$ = NFPROTO_IPV4; }
@@ -4770,7 +4769,7 @@ ct_obj_type		:	HELPER		{ $$ = NFT_OBJECT_CT_HELPER; }
 
 ct_cmd_type		:	HELPERS		{ $$ = CMD_OBJ_CT_HELPERS; }
 			|	TIMEOUT		{ $$ = CMD_OBJ_CT_TIMEOUTS; }
-			|	EXPECTATION	{ $$ = CMD_OBJ_CT_EXPECT; }
+			|	EXPECTATION	{ $$ = CMD_OBJ_CT_EXPECTATIONS; }
 			;
 
 ct_l4protoname		:	TCP	close_scope_tcp	{ $$ = IPPROTO_TCP; }
@@ -4812,8 +4811,7 @@ timeout_states		:	timeout_state
 			}
 			;
 
-timeout_state		:	STRING	COLON	NUM
-
+timeout_state		:	STRING	COLON	time_spec_or_num_s
 			{
 				struct timeout_state *ts;
 

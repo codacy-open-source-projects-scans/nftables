@@ -927,7 +927,8 @@ static bool std_prio_family_hook_compat(int prio, int family, int hook)
 		case NFPROTO_INET:
 		case NFPROTO_IPV4:
 		case NFPROTO_IPV6:
-			if (hook == NF_INET_PRE_ROUTING)
+			if (hook == NF_INET_PRE_ROUTING ||
+			    hook == NF_INET_LOCAL_OUT)
 				return true;
 		}
 		break;
@@ -936,7 +937,8 @@ static bool std_prio_family_hook_compat(int prio, int family, int hook)
 		case NFPROTO_INET:
 		case NFPROTO_IPV4:
 		case NFPROTO_IPV6:
-			if (hook == NF_INET_POST_ROUTING)
+			if (hook == NF_INET_LOCAL_IN ||
+			    hook == NF_INET_POST_ROUTING)
 				return true;
 		}
 	}
@@ -1682,11 +1684,14 @@ static void print_proto_timeout_policy(uint8_t l4, const uint32_t *timeout,
 	nft_print(octx, "%s%spolicy = { ", opts->tab, opts->tab);
 	for (i = 0; i < timeout_protocol[l4].array_size; i++) {
 		if (timeout[i] != timeout_protocol[l4].dflt_timeout[i]) {
+			uint64_t timeout_ms;
+
 			if (comma)
 				nft_print(octx, ", ");
-			nft_print(octx, "%s : %u",
-				  timeout_protocol[l4].state_to_name[i],
-				  timeout[i]);
+			timeout_ms = timeout[i] * 1000u;
+			nft_print(octx, "%s : ",
+				  timeout_protocol[l4].state_to_name[i]);
+			time_print(timeout_ms, octx);
 			comma = true;
 		}
 	}
@@ -2358,6 +2363,7 @@ static int do_command_list(struct netlink_ctx *ctx, struct cmd *cmd)
 	case CMD_OBJ_CT_TIMEOUTS:
 		return do_list_obj(ctx, cmd, NFT_OBJECT_CT_TIMEOUT);
 	case CMD_OBJ_CT_EXPECT:
+	case CMD_OBJ_CT_EXPECTATIONS:
 		return do_list_obj(ctx, cmd, NFT_OBJECT_CT_EXPECT);
 	case CMD_OBJ_LIMIT:
 	case CMD_OBJ_LIMITS:
