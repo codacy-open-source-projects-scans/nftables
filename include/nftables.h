@@ -1,7 +1,6 @@
 #ifndef NFTABLES_NFTABLES_H
 #define NFTABLES_NFTABLES_H
 
-#include <stdbool.h>
 #include <stdarg.h>
 #include <limits.h>
 #include <utils.h>
@@ -22,6 +21,20 @@ struct symbol_tables {
 	const struct symbol_table	*ct_label;
 	const struct symbol_table	*realm;
 };
+
+struct input_ctx {
+	unsigned int flags;
+};
+
+static inline bool nft_input_no_dns(const struct input_ctx *ictx)
+{
+	return ictx->flags & NFT_CTX_INPUT_NO_DNS;
+}
+
+static inline bool nft_input_json(const struct input_ctx *ictx)
+{
+	return ictx->flags & NFT_CTX_INPUT_JSON;
+}
 
 struct output_ctx {
 	unsigned int flags;
@@ -119,6 +132,7 @@ struct nft_ctx {
 	unsigned int		num_vars;
 	unsigned int		parser_max_errors;
 	unsigned int		debug_mask;
+	struct input_ctx	input;
 	struct output_ctx	output;
 	bool			check;
 	struct nft_cache	cache;

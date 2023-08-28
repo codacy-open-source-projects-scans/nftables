@@ -8,10 +8,11 @@
  * Development of this code funded by Astaro AG (http://www.astaro.com/)
  */
 
+#include <nft.h>
+
 #include <stddef.h>
 #include <stdlib.h>
 #include <stdio.h>
-#include <stdint.h>
 #include <string.h>
 #include <arpa/inet.h>
 #include <linux/netfilter.h>
@@ -277,7 +278,10 @@ static int flowtable_not_found(struct eval_ctx *ctx, const struct location *loc,
  */
 static int expr_evaluate_symbol(struct eval_ctx *ctx, struct expr **expr)
 {
-	struct parse_ctx parse_ctx = { .tbl = &ctx->nft->output.tbl, };
+	struct parse_ctx parse_ctx = {
+		.tbl	= &ctx->nft->output.tbl,
+		.input	= &ctx->nft->input,
+	};
 	struct error_record *erec;
 	struct table *table;
 	struct set *set;
@@ -3037,6 +3041,24 @@ static int stmt_evaluate_payload(struct eval_ctx *ctx, struct stmt *stmt)
 static int stmt_evaluate_meter(struct eval_ctx *ctx, struct stmt *stmt)
 {
 	struct expr *key, *set, *setref;
+	struct set *existing_set;
+	struct table *table;
+
+	table = table_cache_find(&ctx->nft->cache.table_cache,
+				 ctx->cmd->handle.table.name,
+				 ctx->cmd->handle.family);
+	if (table == NULL)
+		return table_not_found(ctx);
+
+	existing_set = set_cache_find(table, stmt->meter.name);
+	if (existing_set)
+		return cmd_error(ctx, &stmt->location,
+				 "%s; meter ‘%s’ overlaps an existing %s ‘%s’ in family %s",
+				 strerror(EEXIST),
+				 stmt->meter.name,
+				 set_is_map(existing_set->flags) ? "map" : "set",
+				 existing_set->handle.set.name,
+				 family2str(existing_set->handle.family));
 
 	expr_set_context(&ctx->ectx, NULL, 0);
 	if (expr_evaluate(ctx, &stmt->meter.key) < 0)
@@ -3432,7 +3454,10 @@ static int stmt_evaluate_reject_default(struct eval_ctx *ctx,
 
 static int stmt_evaluate_reject_icmp(struct eval_ctx *ctx, struct stmt *stmt)
 {
-	struct parse_ctx parse_ctx = { .tbl = &ctx->nft->output.tbl, };
+	struct parse_ctx parse_ctx = {
+		.tbl	= &ctx->nft->output.tbl,
+		.input	= &ctx->nft->input,
+	};
 	struct error_record *erec;
 	struct expr *code;
 

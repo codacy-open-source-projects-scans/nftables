@@ -1,7 +1,6 @@
 #ifndef NFTABLES_DATATYPE_H
 #define NFTABLES_DATATYPE_H
 
-#include <stdbool.h>
 #include <json.h>
 
 /**
@@ -182,6 +181,7 @@ struct datatype *dtype_clone(const struct datatype *orig_dtype);
 
 struct parse_ctx {
 	struct symbol_tables	*tbl;
+	const struct input_ctx	*input;
 };
 
 extern struct error_record *symbol_parse(struct parse_ctx *ctx,

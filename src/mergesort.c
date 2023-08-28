@@ -6,7 +6,8 @@
  * later) as published by the Free Software Foundation.
  */
 
-#include <stdint.h>
+#include <nft.h>
+
 #include <expression.h>
 #include <gmputil.h>
 #include <list.h>

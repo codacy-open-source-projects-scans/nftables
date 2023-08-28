@@ -8,6 +8,8 @@
  * Development of this code funded by Astaro AG (http://www.astaro.com/)
  */
 
+#include <nft.h>
+
 #include <stdlib.h>
 #include <string.h>
 #include <inttypes.h>
@@ -29,6 +31,7 @@
 #include <netlink.h>
 #include <json.h>
 #include <misspell.h>
+#include "nftutils.h"
 
 #include <netinet/ip_icmp.h>
 
@@ -599,27 +602,33 @@ static struct error_record *ipaddr_type_parse(struct parse_ctx *ctx,
 					      const struct expr *sym,
 					      struct expr **res)
 {
-	struct addrinfo *ai, hints = { .ai_family = AF_INET,
-				       .ai_socktype = SOCK_DGRAM};
-	struct in_addr *addr;
-	int err;
+	struct in_addr addr;
 
-	err = getaddrinfo(sym->identifier, NULL, &hints, &ai);
-	if (err != 0)
-		return error(&sym->location, "Could not resolve hostname: %s",
-			     gai_strerror(err));
+	if (nft_input_no_dns(ctx->input)) {
+		if (inet_pton(AF_INET, sym->identifier, &addr) != 1)
+			return error(&sym->location, "Invalid IPv4 address");
+	} else {
+		struct addrinfo *ai, hints = { .ai_family = AF_INET,
+					       .ai_socktype = SOCK_DGRAM};
+		int err;
 
-	if (ai->ai_next != NULL) {
+		err = getaddrinfo(sym->identifier, NULL, &hints, &ai);
+		if (err != 0)
+			return error(&sym->location, "Could not resolve hostname: %s",
+				     gai_strerror(err));
+
+		if (ai->ai_next != NULL) {
+			freeaddrinfo(ai);
+			return error(&sym->location,
+				     "Hostname resolves to multiple addresses");
+		}
+		addr = ((struct sockaddr_in *)ai->ai_addr)->sin_addr;
 		freeaddrinfo(ai);
-		return error(&sym->location,
-			     "Hostname resolves to multiple addresses");
 	}
 
-	addr = &((struct sockaddr_in *)ai->ai_addr)->sin_addr;
 	*res = constant_expr_alloc(&sym->location, &ipaddr_type,
 				   BYTEORDER_BIG_ENDIAN,
-				   sizeof(*addr) * BITS_PER_BYTE, addr);
-	freeaddrinfo(ai);
+				   sizeof(addr) * BITS_PER_BYTE, &addr);
 	return NULL;
 }
 
@@ -658,27 +667,33 @@ static struct error_record *ip6addr_type_parse(struct parse_ctx *ctx,
 					       const struct expr *sym,
 					       struct expr **res)
 {
-	struct addrinfo *ai, hints = { .ai_family = AF_INET6,
-				       .ai_socktype = SOCK_DGRAM};
-	struct in6_addr *addr;
-	int err;
+	struct in6_addr addr;
 
-	err = getaddrinfo(sym->identifier, NULL, &hints, &ai);
-	if (err != 0)
-		return error(&sym->location, "Could not resolve hostname: %s",
-			     gai_strerror(err));
+	if (nft_input_no_dns(ctx->input)) {
+		if (inet_pton(AF_INET6, sym->identifier, &addr) != 1)
+			return error(&sym->location, "Invalid IPv6 address");
+	} else {
+		struct addrinfo *ai, hints = { .ai_family = AF_INET6,
+					       .ai_socktype = SOCK_DGRAM};
+		int err;
 
-	if (ai->ai_next != NULL) {
+		err = getaddrinfo(sym->identifier, NULL, &hints, &ai);
+		if (err != 0)
+			return error(&sym->location, "Could not resolve hostname: %s",
+				     gai_strerror(err));
+
+		if (ai->ai_next != NULL) {
+			freeaddrinfo(ai);
+			return error(&sym->location,
+				     "Hostname resolves to multiple addresses");
+		}
+		addr = ((struct sockaddr_in6 *)ai->ai_addr)->sin6_addr;
 		freeaddrinfo(ai);
-		return error(&sym->location,
-			     "Hostname resolves to multiple addresses");
 	}
 
-	addr = &((struct sockaddr_in6 *)ai->ai_addr)->sin6_addr;
 	*res = constant_expr_alloc(&sym->location, &ip6addr_type,
 				   BYTEORDER_BIG_ENDIAN,
-				   sizeof(*addr) * BITS_PER_BYTE, addr);
-	freeaddrinfo(ai);
+				   sizeof(addr) * BITS_PER_BYTE, &addr);
 	return NULL;
 }
 
@@ -697,12 +712,11 @@ const struct datatype ip6addr_type = {
 static void inet_protocol_type_print(const struct expr *expr,
 				      struct output_ctx *octx)
 {
-	struct protoent *p;
-
 	if (!nft_output_numeric_proto(octx)) {
-		p = getprotobynumber(mpz_get_uint8(expr->value));
-		if (p != NULL) {
-			nft_print(octx, "%s", p->p_name);
+		char name[NFT_PROTONAME_MAXSIZE];
+
+		if (nft_getprotobynumber(mpz_get_uint8(expr->value), name, sizeof(name))) {
+			nft_print(octx, "%s", name);
 			return;
 		}
 	}
@@ -711,15 +725,15 @@ static void inet_protocol_type_print(const struct expr *expr,
 
 static void inet_protocol_type_describe(struct output_ctx *octx)
 {
-	struct protoent *p;
 	uint8_t protonum;
 
 	for (protonum = 0; protonum < UINT8_MAX; protonum++) {
-		p = getprotobynumber(protonum);
-		if (!p)
+		char name[NFT_PROTONAME_MAXSIZE];
+
+		if (!nft_getprotobynumber(protonum, name, sizeof(name)))
 			continue;
 
-		nft_print(octx, "\t%-30s\t%u\n", p->p_name, protonum);
+		nft_print(octx, "\t%-30s\t%u\n", name, protonum);
 	}
 }
 
@@ -727,7 +741,6 @@ static struct error_record *inet_protocol_type_parse(struct parse_ctx *ctx,
 						     const struct expr *sym,
 						     struct expr **res)
 {
-	struct protoent *p;
 	uint8_t proto;
 	uintmax_t i;
 	char *end;
@@ -740,11 +753,13 @@ static struct error_record *inet_protocol_type_parse(struct parse_ctx *ctx,
 
 		proto = i;
 	} else {
-		p = getprotobyname(sym->identifier);
-		if (p == NULL)
+		int r;
+
+		r = nft_getprotobyname(sym->identifier);
+		if (r < 0)
 			return error(&sym->location, "Could not resolve protocol name");
 
-		proto = p->p_proto;
+		proto = r;
 	}
 
 	*res = constant_expr_alloc(&sym->location, &inet_protocol_type,
@@ -768,12 +783,12 @@ const struct datatype inet_protocol_type = {
 static void inet_service_print(const struct expr *expr, struct output_ctx *octx)
 {
 	uint16_t port = mpz_get_be16(expr->value);
-	const struct servent *s = getservbyport(port, NULL);
+	char name[NFT_SERVNAME_MAXSIZE];
 
-	if (s == NULL)
+	if (!nft_getservbyport(port, NULL, name, sizeof(name)))
 		nft_print(octx, "%hu", ntohs(port));
 	else
-		nft_print(octx, "\"%s\"", s->s_name);
+		nft_print(octx, "\"%s\"", name);
 }
 
 void inet_service_type_print(const struct expr *expr, struct output_ctx *octx)

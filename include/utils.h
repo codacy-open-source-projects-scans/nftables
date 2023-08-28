@@ -2,8 +2,6 @@
 #define NFTABLES_UTILS_H
 
 #include <asm/byteorder.h>
-#include <stdint.h>
-#include <stdbool.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <unistd.h>
@@ -11,7 +9,6 @@
 #include <list.h>
 #include <gmputil.h>
 
-#include "config.h"
 #ifdef HAVE_VISIBILITY_HIDDEN
 #       define __visible        __attribute__((visibility("default")))
 #       define EXPORT_SYMBOL(x) typeof(x) (x) __visible;

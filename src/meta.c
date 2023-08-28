@@ -10,12 +10,13 @@
  * Development of this code funded by Astaro AG (http://www.astaro.com/)
  */
 
+#include <nft.h>
+
 #include <errno.h>
 #include <limits.h>
 #include <stddef.h>
 #include <stdlib.h>
 #include <stdio.h>
-#include <stdint.h>
 #include <string.h>
 #include <net/if.h>
 #include <net/if_arp.h>
@@ -25,6 +26,7 @@
 #include <linux/netfilter.h>
 #include <linux/pkt_sched.h>
 #include <linux/if_packet.h>
+#include <time.h>
 
 #include <nftables.h>
 #include <expression.h>
@@ -36,10 +38,6 @@
 #include <erec.h>
 #include <iface.h>
 #include <json.h>
-
-#define _XOPEN_SOURCE
-#define __USE_XOPEN
-#include <time.h>
 
 static void tchandle_type_print(const struct expr *expr,
 				struct output_ctx *octx)
@@ -385,21 +383,22 @@ const struct datatype ifname_type = {
 
 static void date_type_print(const struct expr *expr, struct output_ctx *octx)
 {
-	uint64_t tstamp = mpz_get_uint64(expr->value);
-	struct tm *tm, *cur_tm;
+	uint64_t tstamp64 = mpz_get_uint64(expr->value);
 	char timestr[21];
+	time_t tstamp;
+	struct tm tm;
 
 	/* Convert from nanoseconds to seconds */
-	tstamp /= 1000000000L;
+	tstamp64 /= 1000000000L;
 
 	/* Obtain current tm, to add tm_gmtoff to the timestamp */
-	cur_tm = localtime((time_t *) &tstamp);
+	tstamp = tstamp64;
+	if (localtime_r(&tstamp, &tm))
+		tstamp64 += tm.tm_gmtoff;
 
-	if (cur_tm)
-		tstamp += cur_tm->tm_gmtoff;
-
-	if ((tm = gmtime((time_t *) &tstamp)) != NULL &&
-	     strftime(timestr, sizeof(timestr) - 1, "%Y-%m-%d %T", tm))
+	tstamp = tstamp64;
+	if (gmtime_r(&tstamp, &tm) &&
+	     strftime(timestr, sizeof(timestr) - 1, "%Y-%m-%d %T", &tm))
 		nft_print(octx, "\"%s\"", timestr);
 	else
 		nft_print(octx, "Error converting timestamp to printed time");
@@ -407,7 +406,8 @@ static void date_type_print(const struct expr *expr, struct output_ctx *octx)
 
 static bool parse_iso_date(uint64_t *tstamp, const char *sym)
 {
-	struct tm tm, *cur_tm;
+	struct tm cur_tm;
+	struct tm tm;
 	time_t ts;
 
 	memset(&tm, 0, sizeof(struct tm));
@@ -429,14 +429,15 @@ success:
 	 */
 	ts = timegm(&tm);
 
-	/* Obtain current tm as well (at the specified time), so that we can substract tm_gmtoff */
-	cur_tm = localtime(&ts);
+	if (ts == (time_t) -1)
+		return false;
 
-	if (ts == (time_t) -1 || cur_tm == NULL)
+	/* Obtain current tm as well (at the specified time), so that we can substract tm_gmtoff */
+	if (!localtime_r(&ts, &cur_tm))
 		return false;
 
 	/* Substract tm_gmtoff to get the current time */
-	*tstamp = ts - cur_tm->tm_gmtoff;
+	*tstamp = ts - cur_tm.tm_gmtoff;
 
 	return true;
 }
@@ -491,15 +492,13 @@ static void day_type_print(const struct expr *expr, struct output_ctx *octx)
 static void hour_type_print(const struct expr *expr, struct output_ctx *octx)
 {
 	uint32_t seconds = mpz_get_uint32(expr->value), minutes, hours;
-	struct tm *cur_tm;
+	struct tm cur_tm;
 	time_t ts;
 
 	/* Obtain current tm, so that we can add tm_gmtoff */
 	ts = time(NULL);
-	cur_tm = localtime(&ts);
-
-	if (cur_tm)
-		seconds = (seconds + cur_tm->tm_gmtoff) % SECONDS_PER_DAY;
+	if (ts != ((time_t) -1) && localtime_r(&ts, &cur_tm))
+		seconds = (seconds + cur_tm.tm_gmtoff) % SECONDS_PER_DAY;
 
 	minutes = seconds / 60;
 	seconds %= 60;
@@ -517,10 +516,12 @@ static struct error_record *hour_type_parse(struct parse_ctx *ctx,
 					    struct expr **res)
 {
 	struct error_record *er;
-	struct tm tm, *cur_tm;
+	struct tm cur_tm_data;
+	struct tm *cur_tm;
 	uint32_t result;
 	uint64_t tmp;
 	char *endptr;
+	struct tm tm;
 	time_t ts;
 
 	memset(&tm, 0, sizeof(struct tm));
@@ -534,7 +535,10 @@ static struct error_record *hour_type_parse(struct parse_ctx *ctx,
 
 	/* Obtain current tm, so that we can substract tm_gmtoff */
 	ts = time(NULL);
-	cur_tm = localtime(&ts);
+	if (ts != ((time_t) -1) && localtime_r(&ts, &cur_tm_data))
+		cur_tm = &cur_tm_data;
+	else
+		cur_tm = NULL;
 
 	endptr = strptime(sym->identifier, "%T", &tm);
 	if (endptr && *endptr == '\0')

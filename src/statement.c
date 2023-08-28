@@ -8,10 +8,11 @@
  * Development of this code funded by Astaro AG (http://www.astaro.com/)
  */
 
+#include <nft.h>
+
 #include <stddef.h>
 #include <stdlib.h>
 #include <stdio.h>
-#include <stdint.h>
 #include <inttypes.h>
 #include <string.h>
 #include <syslog.h>

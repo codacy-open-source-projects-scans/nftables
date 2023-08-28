@@ -37,6 +37,11 @@ class SchemaValidator:
 class Nftables:
     """A class representing libnftables interface"""
 
+    input_flags = {
+        "no-dns": 0x1,
+        "json": 0x2,
+    }
+
     debug_flags = {
         "scanner":   0x1,
         "parser":    0x2,
@@ -74,6 +79,8 @@ class Nftables:
         is requested from the library and buffering of output and error streams
         is turned on.
         """
+        self.__ctx = None
+
         lib = cdll.LoadLibrary(sofile)
 
         ### API function definitions
@@ -81,6 +88,14 @@ class Nftables:
         self.nft_ctx_new = lib.nft_ctx_new
         self.nft_ctx_new.restype = c_void_p
         self.nft_ctx_new.argtypes = [c_int]
+
+        self.nft_ctx_input_get_flags = lib.nft_ctx_input_get_flags
+        self.nft_ctx_input_get_flags.restype = c_uint
+        self.nft_ctx_input_get_flags.argtypes = [c_void_p]
+
+        self.nft_ctx_input_set_flags = lib.nft_ctx_input_set_flags
+        self.nft_ctx_input_set_flags.restype = c_uint
+        self.nft_ctx_input_set_flags.argtypes = [c_void_p, c_uint]
 
         self.nft_ctx_output_get_flags = lib.nft_ctx_output_get_flags
         self.nft_ctx_output_get_flags.restype = c_uint
@@ -150,7 +165,68 @@ class Nftables:
         self.nft_ctx_buffer_error(self.__ctx)
 
     def __del__(self):
-        self.nft_ctx_free(self.__ctx)
+        if self.__ctx is not None:
+            self.nft_ctx_free(self.__ctx)
+            self.__ctx = None
+
+    def _flags_from_numeric(self, flags_dict, val):
+        names = []
+        for n, v in flags_dict.items():
+            if val & v:
+                names.append(n)
+                val &= ~v
+        if val:
+            names.append(val)
+        return names
+
+    def _flags_to_numeric(self, flags_dict, values):
+        if isinstance(values, (str, int)):
+            values = (values,)
+
+        val = 0
+        for v in values:
+            if isinstance(v, str):
+                v = flags_dict.get(v)
+                if v is None:
+                    raise ValueError("Invalid argument")
+            elif isinstance(v, int):
+                if v < 0 or v > 0xFFFFFFFF:
+                    raise ValueError("Invalid argument")
+            else:
+                raise TypeError("Not a valid flag")
+            val |= v
+
+        return val
+
+    def get_input_flags(self):
+        """Get currently active input flags.
+
+        Returns a set of flag names. See set_input_flags() for details.
+        """
+        val = self.nft_ctx_input_get_flags(self.__ctx)
+        return self._flags_from_numeric(self.input_flags, val)
+
+    def set_input_flags(self, values):
+        """Set input flags.
+
+        Resets all input flags to values. Accepts either a single flag or a list
+        of flags. Each flag might be given either as string or integer value as
+        shown in the following table:
+
+        Name      | Value (hex)
+        -----------------------
+        "no-dns"  | 0x1
+        "json"    | 0x2
+
+        "no-dns" disables blocking address lookup.
+        "json" enables JSON mode for input.
+
+        Returns a set of previously active input flags, as returned by
+        get_input_flags() method.
+        """
+        val = self._flags_to_numeric(self.input_flags, values)
+        old = self.nft_ctx_input_set_flags(self.__ctx, val)
+        return self._flags_from_numeric(self.input_flags, old)
 
     def __get_output_flag(self, name):
         flag = self.output_flags[name]
@@ -371,16 +447,7 @@ class Nftables:
         Returns a set of flag names. See set_debug() for details.
         """
         val = self.nft_ctx_output_get_debug(self.__ctx)
-
-        names = []
-        for n,v in self.debug_flags.items():
-            if val & v:
-                names.append(n)
-                val &= ~v
-        if val:
-            names.append(val)
-
-        return names
+        return self._flags_from_numeric(self.debug_flags, val)
 
     def set_debug(self, values):
         """Set debug output flags.
@@ -402,19 +469,9 @@ class Nftables:
         Returns a set of previously active debug flags, as returned by
         get_debug() method.
         """
+        val = self._flags_to_numeric(self.debug_flags, values)
         old = self.get_debug()
-
-        if type(values) in [str, int]:
-            values = [values]
-
-        val = 0
-        for v in values:
-            if type(v) is str:
-                v = self.debug_flags[v]
-            val |= v
-
         self.nft_ctx_output_set_debug(self.__ctx, val)
-
         return old
 
     def cmd(self, cmdline):

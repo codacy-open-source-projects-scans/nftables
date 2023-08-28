@@ -23,6 +23,9 @@ AM_CONDITIONAL([BUILD_MAN], [test "x$enable_man_doc" = "xyes" ])
 
 # Checks for programs.
 AC_PROG_CC
+
+AC_USE_SYSTEM_EXTENSIONS
+
 AC_PROG_MKDIR_P
 AC_PROG_INSTALL
 AC_PROG_SED
@@ -44,7 +47,6 @@ fi
 
 AM_PROG_AR
 LT_INIT([disable-static])
-AM_PROG_CC_C_O
 AC_EXEEXT
 CHECK_GCC_FVISIBILITY
 
@@ -107,6 +109,10 @@ AC_CHECK_LIB([jansson], [json_object], ,
 AC_DEFINE([HAVE_LIBJANSSON], [1], [Define if you have libjansson])
 ])
 AM_CONDITIONAL([BUILD_JSON], [test "x$with_json" != xno])
+
+AC_CHECK_DECLS([getprotobyname_r, getprotobynumber_r, getservbyport_r], [], [], [[
+#include <netdb.h>
+]])
 
 AC_CONFIG_FILES([					\
 		Makefile				\

@@ -5,6 +5,9 @@
  * it under the terms of the GNU General Public License version 2 (or any
  * later) as published by the Free Software Foundation.
  */
+
+#include <nft.h>
+
 #include <nftables/libnftables.h>
 #include <erec.h>
 #include <mnl.h>
@@ -401,6 +404,22 @@ void nft_ctx_set_optimize(struct nft_ctx *ctx, uint32_t flags)
 	ctx->optimize_flags = flags;
 }
 
+EXPORT_SYMBOL(nft_ctx_input_get_flags);
+unsigned int nft_ctx_input_get_flags(struct nft_ctx *ctx)
+{
+	return ctx->input.flags;
+}
+
+EXPORT_SYMBOL(nft_ctx_input_set_flags);
+unsigned int nft_ctx_input_set_flags(struct nft_ctx *ctx, unsigned int flags)
+{
+	unsigned int old_flags;
+
+	old_flags = ctx->input.flags;
+	ctx->input.flags = flags;
+	return old_flags;
+}
+
 EXPORT_SYMBOL(nft_ctx_output_get_flags);
 unsigned int nft_ctx_output_get_flags(struct nft_ctx *ctx)
 {
@@ -566,7 +585,7 @@ int nft_run_cmd_from_buffer(struct nft_ctx *nft, const char *buf)
 	nlbuf = xzalloc(strlen(buf) + 2);
 	sprintf(nlbuf, "%s\n", buf);
 
-	if (nft_output_json(&nft->output))
+	if (nft_output_json(&nft->output) || nft_input_json(&nft->input))
 		rc = nft_parse_json_buffer(nft, nlbuf, &msgs, &cmds);
 	if (rc == -EINVAL)
 		rc = nft_parse_bison_buffer(nft, nlbuf, &msgs, &cmds,
@@ -667,7 +686,7 @@ static int __nft_run_cmd_from_filename(struct nft_ctx *nft, const char *filename
 		goto err;
 
 	rc = -EINVAL;
-	if (nft_output_json(&nft->output))
+	if (nft_output_json(&nft->output) || nft_input_json(&nft->input))
 		rc = nft_parse_json_filename(nft, filename, &msgs, &cmds);
 	if (rc == -EINVAL)
 		rc = nft_parse_bison_filename(nft, filename, &msgs, &cmds);
