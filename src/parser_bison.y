@@ -2029,7 +2029,7 @@ table_block		:	/* empty */	{ $$ = $<table>-1; }
 
 chain_block_alloc	:	/* empty */
 			{
-				$$ = chain_alloc(NULL);
+				$$ = chain_alloc();
 				if (open_scope(state, &$$->scope) < 0) {
 					erec_queue(error(&@$, "too many levels of nesting"),
 						   state->msgs);
@@ -2134,7 +2134,7 @@ typeof_expr		:	primary_expr
 
 set_block_alloc		:	/* empty */
 			{
-				$$ = set_alloc(NULL);
+				$$ = set_alloc(&internal_location);
 			}
 			;
 
@@ -2214,7 +2214,7 @@ set_flag		:	CONSTANT	{ $$ = NFT_SET_CONSTANT; }
 
 map_block_alloc		:	/* empty */
 			{
-				$$ = set_alloc(NULL);
+				$$ = set_alloc(&internal_location);
 			}
 			;
 
@@ -2235,6 +2235,11 @@ map_block		:	/* empty */	{ $$ = $<set>-1; }
 			|	map_block	TIMEOUT		time_spec	stmt_separator
 			{
 				$1->timeout = $3;
+				$$ = $1;
+			}
+			|	map_block	GC_INTERVAL	time_spec	stmt_separator
+			{
+				$1->gc_int = $3;
 				$$ = $1;
 			}
 			|	map_block	TYPE
@@ -2324,7 +2329,7 @@ set_policy_spec		:	PERFORMANCE	{ $$ = NFT_SET_POL_PERFORMANCE; }
 
 flowtable_block_alloc	:	/* empty */
 			{
-				$$ = flowtable_alloc(NULL);
+				$$ = flowtable_alloc(&internal_location);
 			}
 			;
 
@@ -2443,7 +2448,7 @@ data_type_expr		:	data_type_atom_expr
 
 obj_block_alloc		:       /* empty */
 			{
-				$$ = obj_alloc(NULL);
+				$$ = obj_alloc(&internal_location);
 			}
 			;
 
@@ -3655,8 +3660,8 @@ reject_opts		:       /* empty */
 nat_stmt		:	nat_stmt_alloc	nat_stmt_args
 			;
 
-nat_stmt_alloc		:	SNAT	{ $$ = nat_stmt_alloc(&@$, NFT_NAT_SNAT); }
-			|	DNAT	{ $$ = nat_stmt_alloc(&@$, NFT_NAT_DNAT); }
+nat_stmt_alloc		:	SNAT	{ $$ = nat_stmt_alloc(&@$, __NFT_NAT_SNAT); }
+			|	DNAT	{ $$ = nat_stmt_alloc(&@$, __NFT_NAT_DNAT); }
 			;
 
 tproxy_stmt		:	TPROXY TO stmt_expr

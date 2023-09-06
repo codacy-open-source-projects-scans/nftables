@@ -1815,21 +1815,6 @@ static int expr_evaluate_set(struct eval_ctx *ctx, struct expr **expr)
 	if (ctx->set) {
 		if (ctx->set->flags & NFT_SET_CONCAT)
 			set->set_flags |= NFT_SET_CONCAT;
-	} else if (set->size == 1) {
-		i = list_first_entry(&set->expressions, struct expr, list);
-		if (i->etype == EXPR_SET_ELEM && list_empty(&i->stmt_list)) {
-			switch (i->key->etype) {
-			case EXPR_PREFIX:
-			case EXPR_RANGE:
-			case EXPR_VALUE:
-				*expr = i->key;
-				i->key = NULL;
-				expr_free(set);
-				return 0;
-			default:
-				break;
-			}
-		}
 	}
 
 	set->set_flags |= NFT_SET_CONSTANT;
@@ -2062,17 +2047,14 @@ static int expr_evaluate_mapping(struct eval_ctx *ctx, struct expr **expr)
 				  "Key must be a constant");
 	mapping->flags |= mapping->left->flags & EXPR_F_SINGLETON;
 
-	if (set->data) {
-		if (!set_is_anonymous(set->flags) &&
-		    set->data->flags & EXPR_F_INTERVAL)
-			datalen = set->data->len / 2;
-		else
-			datalen = set->data->len;
-
-		__expr_set_context(&ctx->ectx, set->data->dtype, set->data->byteorder, datalen, 0);
-	} else {
-		assert((set->flags & NFT_SET_MAP) == 0);
-	}
+	assert(set->data != NULL);
+	if (!set_is_anonymous(set->flags) &&
+	    set->data->flags & EXPR_F_INTERVAL)
+		datalen = set->data->len / 2;
+	else
+		datalen = set->data->len;
+	__expr_set_context(&ctx->ectx, set->data->dtype,
+			   set->data->byteorder, datalen, 0);
 
 	if (expr_evaluate(ctx, &mapping->right) < 0)
 		return -1;
@@ -2353,6 +2335,35 @@ static bool range_needs_swap(const struct expr *range)
 	return mpz_cmp(left->value, right->value) > 0;
 }
 
+static void optimize_singleton_set(struct expr *rel, struct expr **expr)
+{
+	struct expr *set = rel->right, *i;
+
+	i = list_first_entry(&set->expressions, struct expr, list);
+	if (i->etype == EXPR_SET_ELEM &&
+	    list_empty(&i->stmt_list)) {
+
+		switch (i->key->etype) {
+		case EXPR_PREFIX:
+		case EXPR_RANGE:
+		case EXPR_VALUE:
+			rel->right = *expr = i->key;
+			i->key = NULL;
+			expr_free(set);
+			break;
+		default:
+			break;
+		}
+	}
+
+	if (rel->op == OP_IMPLICIT &&
+	    rel->right->dtype->basetype &&
+	    rel->right->dtype->basetype->type == TYPE_BITMASK &&
+	    rel->right->dtype->type != TYPE_CT_STATE) {
+		rel->op = OP_EQ;
+	}
+}
+
 static int expr_evaluate_relational(struct eval_ctx *ctx, struct expr **expr)
 {
 	struct expr *rel = *expr, *left, *right;
@@ -2431,6 +2442,17 @@ static int expr_evaluate_relational(struct eval_ctx *ctx, struct expr **expr)
 	    right->flags & EXPR_F_CONSTANT)
 		return expr_binary_error(ctx->msgs, right, left,
 					 "Cannot be used with right hand side constant value");
+
+	switch (rel->op) {
+	case OP_EQ:
+	case OP_IMPLICIT:
+	case OP_NEQ:
+		if (right->etype == EXPR_SET && right->size == 1)
+			optimize_singleton_set(rel, &right);
+		break;
+	default:
+		break;
+	}
 
 	switch (rel->op) {
 	case OP_EQ:
@@ -2830,6 +2852,10 @@ static int __stmt_evaluate_arg(struct eval_ctx *ctx, struct stmt *stmt,
 		return byteorder_conversion(ctx, expr, byteorder);
 	case EXPR_PREFIX:
 		return stmt_prefix_conversion(ctx, expr, byteorder);
+	case EXPR_NUMGEN:
+		if (dtype->type == TYPE_IPADDR)
+			return byteorder_conversion(ctx, expr, byteorder);
+		break;
 	default:
 		break;
 	}
@@ -4128,15 +4154,20 @@ static int stmt_evaluate_queue(struct eval_ctx *ctx, struct stmt *stmt)
 
 static int stmt_evaluate_log_prefix(struct eval_ctx *ctx, struct stmt *stmt)
 {
-	char prefix[NF_LOG_PREFIXLEN] = {}, tmp[NF_LOG_PREFIXLEN] = {};
-	int len = sizeof(prefix), offset = 0, ret;
+	char tmp[NF_LOG_PREFIXLEN] = {};
+	char prefix[NF_LOG_PREFIXLEN];
+	size_t len = sizeof(prefix);
+	size_t offset = 0;
 	struct expr *expr;
-	size_t size = 0;
 
 	if (stmt->log.prefix->etype != EXPR_LIST)
 		return 0;
 
+	prefix[0] = '\0';
+
 	list_for_each_entry(expr, &stmt->log.prefix->expressions, list) {
+		int ret;
+
 		switch (expr->etype) {
 		case EXPR_VALUE:
 			expr_to_string(expr, tmp);
@@ -4150,10 +4181,10 @@ static int stmt_evaluate_log_prefix(struct eval_ctx *ctx, struct stmt *stmt)
 			BUG("unknown expression type %s\n", expr_name(expr));
 			break;
 		}
-		SNPRINTF_BUFFER_SIZE(ret, size, len, offset);
+		SNPRINTF_BUFFER_SIZE(ret, &len, &offset);
 	}
 
-	if (len == NF_LOG_PREFIXLEN)
+	if (len == 0)
 		return stmt_error(ctx, stmt, "log prefix is too long");
 
 	expr = constant_expr_alloc(&stmt->log.prefix->location, &string_type,
@@ -4998,7 +5029,7 @@ static int chain_evaluate(struct eval_ctx *ctx, struct chain *chain)
 
 	if (chain == NULL) {
 		if (!chain_cache_find(table, ctx->cmd->handle.chain.name)) {
-			chain = chain_alloc(NULL);
+			chain = chain_alloc();
 			handle_merge(&chain->handle, &ctx->cmd->handle);
 			chain_cache_add(chain, table);
 		}

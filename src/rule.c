@@ -148,11 +148,12 @@ struct set *set_alloc(const struct location *loc)
 {
 	struct set *set;
 
+	assert(loc);
+
 	set = xzalloc(sizeof(*set));
 	set->refcnt = 1;
 	set->handle.set_id = ++set_id;
-	if (loc != NULL)
-		set->location = *loc;
+	set->location = *loc;
 
 	init_list_head(&set->stmt_list);
 
@@ -163,7 +164,7 @@ struct set *set_clone(const struct set *set)
 {
 	struct set *new_set;
 
-	new_set			= set_alloc(NULL);
+	new_set			= set_alloc(&internal_location);
 	handle_merge(&new_set->handle, &set->handle);
 	new_set->flags		= set->flags;
 	new_set->gc_int		= set->gc_int;
@@ -192,8 +193,8 @@ void set_free(struct set *set)
 
 	if (--set->refcnt > 0)
 		return;
-	if (set->init != NULL)
-		expr_free(set->init);
+
+	expr_free(set->init);
 	if (set->comment)
 		xfree(set->comment);
 	handle_free(&set->handle);
@@ -455,6 +456,8 @@ struct rule *rule_alloc(const struct location *loc, const struct handle *h)
 {
 	struct rule *rule;
 
+	assert(loc);
+
 	rule = xzalloc(sizeof(*rule));
 	rule->location = *loc;
 	init_list_head(&rule->list);
@@ -697,17 +700,16 @@ const char *chain_hookname_lookup(const char *name)
 /* internal ID to uniquely identify a set in the batch */
 static uint32_t chain_id;
 
-struct chain *chain_alloc(const char *name)
+struct chain *chain_alloc(void)
 {
 	struct chain *chain;
 
 	chain = xzalloc(sizeof(*chain));
+	chain->location = internal_location;
 	chain->refcnt = 1;
 	chain->handle.chain_id = ++chain_id;
 	init_list_head(&chain->rules);
 	init_list_head(&chain->scope.symbols);
-	if (name != NULL)
-		chain->handle.chain.name = xstrdup(name);
 
 	chain->policy = NULL;
 	return chain;
@@ -866,7 +868,7 @@ struct prio_tag {
 	const char *str;
 };
 
-const static struct prio_tag std_prios[] = {
+static const struct prio_tag std_prios[] = {
 	{ NF_IP_PRI_RAW,      "raw" },
 	{ NF_IP_PRI_MANGLE,   "mangle" },
 	{ NF_IP_PRI_NAT_DST,  "dstnat" },
@@ -875,7 +877,7 @@ const static struct prio_tag std_prios[] = {
 	{ NF_IP_PRI_NAT_SRC,  "srcnat" },
 };
 
-const static struct prio_tag bridge_std_prios[] = {
+static const struct prio_tag bridge_std_prios[] = {
 	{ NF_BR_PRI_NAT_DST_BRIDGED,  "dstnat" },
 	{ NF_BR_PRI_FILTER_BRIDGED,   "filter" },
 	{ NF_BR_PRI_NAT_DST_OTHER,    "out" },
@@ -1124,6 +1126,7 @@ struct table *table_alloc(void)
 	struct table *table;
 
 	table = xzalloc(sizeof(*table));
+	table->location = internal_location;
 	init_list_head(&table->chains);
 	init_list_head(&table->sets);
 	init_list_head(&table->objs);
@@ -1299,6 +1302,8 @@ struct cmd *cmd_alloc(enum cmd_ops op, enum cmd_obj obj,
 		      void *data)
 {
 	struct cmd *cmd;
+
+	assert(loc);
 
 	cmd = xzalloc(sizeof(*cmd));
 	init_list_head(&cmd->list);
@@ -1614,9 +1619,10 @@ struct obj *obj_alloc(const struct location *loc)
 {
 	struct obj *obj;
 
+	assert(loc);
+
 	obj = xzalloc(sizeof(*obj));
-	if (loc != NULL)
-		obj->location = *loc;
+	obj->location = *loc;
 
 	obj->refcnt = 1;
 	return obj;
@@ -2025,9 +2031,10 @@ struct flowtable *flowtable_alloc(const struct location *loc)
 {
 	struct flowtable *flowtable;
 
+	assert(loc);
+
 	flowtable = xzalloc(sizeof(*flowtable));
-	if (loc != NULL)
-		flowtable->location = *loc;
+	flowtable->location = *loc;
 
 	flowtable->refcnt = 1;
 	return flowtable;

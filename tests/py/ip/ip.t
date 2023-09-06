@@ -48,12 +48,15 @@ ip id != 33-45;ok
 ip id { 33, 55, 67, 88};ok
 ip id != { 33, 55, 67, 88};ok
 
-ip frag-off 222 accept;ok
-ip frag-off != 233;ok
-ip frag-off 33-45;ok
-ip frag-off != 33-45;ok
-ip frag-off { 33, 55, 67, 88};ok
-ip frag-off != { 33, 55, 67, 88};ok
+ip frag-off 0xde accept;ok
+ip frag-off != 0xe9;ok
+ip frag-off 0x21-0x2d;ok
+ip frag-off != 0x21-0x2d;ok
+ip frag-off { 0x21, 0x37, 0x43, 0x58};ok
+ip frag-off != { 0x21, 0x37, 0x43, 0x58};ok
+ip frag-off & 0x1fff != 0x0;ok
+ip frag-off & 0x2000 != 0x0;ok
+ip frag-off & 0x4000 != 0x0;ok
 
 ip ttl 0 drop;ok
 ip ttl 233;ok
