@@ -13,7 +13,6 @@
 #include <nft.h>
 
 #include <stddef.h>
-#include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
 #include <net/if_arp.h>
@@ -251,11 +250,10 @@ static struct expr *payload_expr_parse_udata(const struct nftnl_udata *attr)
 		expr->payload.offset = offset;
 		expr->payload.is_raw = true;
 		expr->len = len;
-		dtype = dtype_clone(&xinteger_type);
+		dtype = datatype_clone(&xinteger_type);
 		dtype->size = len;
 		dtype->byteorder = BYTEORDER_BIG_ENDIAN;
-		dtype->refcnt = 1;
-		expr->dtype = dtype;
+		__datatype_set(expr, dtype);
 	}
 
 	if (ud[NFTNL_UDATA_SET_KEY_PAYLOAD_INNER_DESC]) {

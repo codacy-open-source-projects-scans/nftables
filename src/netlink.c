@@ -16,7 +16,6 @@
 #include <libmnl/libmnl.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
-#include <stdlib.h>
 #include <inttypes.h>
 
 #include <libnftnl/table.h>
@@ -799,6 +798,10 @@ enum nft_data_types dtype_map_to_kernel(const struct datatype *dtype)
 
 static const struct datatype *dtype_map_from_kernel(enum nft_data_types type)
 {
+	/* The function always returns ownership of a reference. But for
+	 * &verdict_Type and datatype_lookup(), those are static instances,
+	 * we can omit the datatype_get() call.
+	 */
 	switch (type) {
 	case NFT_DATA_VERDICT:
 		return &verdict_type;
@@ -934,20 +937,20 @@ struct set *netlink_delinearize_set(struct netlink_ctx *ctx,
 	const struct nftnl_udata *ud[NFTNL_UDATA_SET_MAX + 1] = {};
 	enum byteorder keybyteorder = BYTEORDER_INVALID;
 	enum byteorder databyteorder = BYTEORDER_INVALID;
-	const struct datatype *keytype, *datatype = NULL;
-	struct expr *typeof_expr_key, *typeof_expr_data;
 	struct setelem_parse_ctx set_parse_ctx;
+	const struct datatype *datatype = NULL;
+	const struct datatype *keytype = NULL;
+	const struct datatype *dtype2 = NULL;
+	const struct datatype *dtype = NULL;
+	struct expr *typeof_expr_data = NULL;
+	struct expr *typeof_expr_key = NULL;
 	const char *udata, *comment = NULL;
 	uint32_t flags, key, objtype = 0;
-	const struct datatype *dtype;
 	uint32_t data_interval = 0;
 	bool automerge = false;
 	struct set *set;
 	uint32_t ulen;
 	uint32_t klen;
-
-	typeof_expr_key = NULL;
-	typeof_expr_data = NULL;
 
 	if (nftnl_set_is_set(nls, NFTNL_SET_USERDATA)) {
 		udata = nftnl_set_get_data(nls, NFTNL_SET_USERDATA, &ulen);
@@ -991,8 +994,8 @@ struct set *netlink_delinearize_set(struct netlink_ctx *ctx,
 			netlink_io_error(ctx, NULL,
 					 "Unknown data type in set key %u",
 					 data);
-			datatype_free(keytype);
-			return NULL;
+			set = NULL;
+			goto out;
 		}
 	}
 
@@ -1030,19 +1033,18 @@ struct set *netlink_delinearize_set(struct netlink_ctx *ctx,
 	if (datatype) {
 		uint32_t dlen;
 
-		dtype = set_datatype_alloc(datatype, databyteorder);
+		dtype2 = set_datatype_alloc(datatype, databyteorder);
 		klen = nftnl_set_get_u32(nls, NFTNL_SET_DATA_LEN) * BITS_PER_BYTE;
 
 		dlen = data_interval ?  klen / 2 : klen;
 
 		if (set_udata_key_valid(typeof_expr_data, dlen)) {
 			typeof_expr_data->len = klen;
-			datatype_free(datatype_get(dtype));
 			set->data = typeof_expr_data;
+			typeof_expr_data = NULL;
 		} else {
-			expr_free(typeof_expr_data);
 			set->data = constant_expr_alloc(&netlink_location,
-							dtype,
+							dtype2,
 							databyteorder, klen,
 							NULL);
 
@@ -1053,27 +1055,20 @@ struct set *netlink_delinearize_set(struct netlink_ctx *ctx,
 
 		if (data_interval)
 			set->data->flags |= EXPR_F_INTERVAL;
-
-		if (dtype != datatype)
-			datatype_free(datatype);
 	}
 
 	dtype = set_datatype_alloc(keytype, keybyteorder);
 	klen = nftnl_set_get_u32(nls, NFTNL_SET_KEY_LEN) * BITS_PER_BYTE;
 
 	if (set_udata_key_valid(typeof_expr_key, klen)) {
-		datatype_free(datatype_get(dtype));
 		set->key = typeof_expr_key;
+		typeof_expr_key = NULL;
 		set->key_typeof_valid = true;
 	} else {
-		expr_free(typeof_expr_key);
 		set->key = constant_expr_alloc(&netlink_location, dtype,
 					       keybyteorder, klen,
 					       NULL);
 	}
-
-	if (dtype != keytype)
-		datatype_free(keytype);
 
 	set->flags   = nftnl_set_get_u32(nls, NFTNL_SET_FLAGS);
 	set->handle.handle.id = nftnl_set_get_u64(nls, NFTNL_SET_HANDLE);
@@ -1102,6 +1097,13 @@ struct set *netlink_delinearize_set(struct netlink_ctx *ctx,
 		}
 	}
 
+out:
+	expr_free(typeof_expr_data);
+	expr_free(typeof_expr_key);
+	datatype_free(datatype);
+	datatype_free(keytype);
+	datatype_free(dtype2);
+	datatype_free(dtype);
 	return set;
 }
 

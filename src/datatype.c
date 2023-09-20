@@ -10,7 +10,6 @@
 
 #include <nft.h>
 
-#include <stdlib.h>
 #include <string.h>
 #include <inttypes.h>
 #include <ctype.h> /* isdigit */
@@ -1199,12 +1198,13 @@ static struct error_record *concat_type_parse(struct parse_ctx *ctx,
 		     sym->dtype->desc);
 }
 
-static struct datatype *dtype_alloc(void)
+static struct datatype *datatype_alloc(void)
 {
 	struct datatype *dtype;
 
 	dtype = xzalloc(sizeof(*dtype));
 	dtype->flags = DTYPE_F_ALLOC;
+	dtype->refcnt = 1;
 
 	return dtype;
 }
@@ -1222,15 +1222,22 @@ struct datatype *datatype_get(const struct datatype *ptr)
 	return dtype;
 }
 
-void datatype_set(struct expr *expr, const struct datatype *dtype)
+void __datatype_set(struct expr *expr, const struct datatype *dtype)
 {
-	if (dtype == expr->dtype)
-		return;
-	datatype_free(expr->dtype);
-	expr->dtype = datatype_get(dtype);
+	const struct datatype *dtype_free;
+
+	dtype_free = expr->dtype;
+	expr->dtype = dtype;
+	datatype_free(dtype_free);
 }
 
-struct datatype *dtype_clone(const struct datatype *orig_dtype)
+void datatype_set(struct expr *expr, const struct datatype *dtype)
+{
+	if (dtype != expr->dtype)
+		__datatype_set(expr, datatype_get(dtype));
+}
+
+struct datatype *datatype_clone(const struct datatype *orig_dtype)
 {
 	struct datatype *dtype;
 
@@ -1239,7 +1246,7 @@ struct datatype *dtype_clone(const struct datatype *orig_dtype)
 	dtype->name = xstrdup(orig_dtype->name);
 	dtype->desc = xstrdup(orig_dtype->desc);
 	dtype->flags = DTYPE_F_ALLOC | orig_dtype->flags;
-	dtype->refcnt = 0;
+	dtype->refcnt = 1;
 
 	return dtype;
 }
@@ -1252,6 +1259,9 @@ void datatype_free(const struct datatype *ptr)
 		return;
 	if (!(dtype->flags & DTYPE_F_ALLOC))
 		return;
+
+	assert(dtype->refcnt != 0);
+
 	if (--dtype->refcnt > 0)
 		return;
 
@@ -1286,7 +1296,7 @@ const struct datatype *concat_type_alloc(uint32_t type)
 	}
 	strncat(desc, ")", sizeof(desc) - strlen(desc) - 1);
 
-	dtype		= dtype_alloc();
+	dtype		= datatype_alloc();
 	dtype->type	= type;
 	dtype->size	= size;
 	dtype->subtypes = subtypes;
@@ -1304,9 +1314,9 @@ const struct datatype *set_datatype_alloc(const struct datatype *orig_dtype,
 
 	/* Restrict dynamic datatype allocation to generic integer datatype. */
 	if (orig_dtype != &integer_type)
-		return orig_dtype;
+		return datatype_get(orig_dtype);
 
-	dtype = dtype_clone(orig_dtype);
+	dtype = datatype_clone(orig_dtype);
 	dtype->byteorder = byteorder;
 
 	return dtype;

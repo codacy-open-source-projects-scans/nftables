@@ -16,7 +16,6 @@
 #include <iface.h>
 #include <cmd.h>
 #include <errno.h>
-#include <stdlib.h>
 #include <string.h>
 
 static int nft_netlink(struct nft_ctx *nft,
@@ -192,16 +191,11 @@ void nft_ctx_clear_include_paths(struct nft_ctx *ctx)
 EXPORT_SYMBOL(nft_ctx_new);
 struct nft_ctx *nft_ctx_new(uint32_t flags)
 {
-	static bool init_once;
 	struct nft_ctx *ctx;
 
-	if (!init_once) {
-		init_once = true;
-		gmp_init();
 #ifdef HAVE_LIBXTABLES
-		xt_init();
+	xt_init();
 #endif
-	}
 
 	ctx = xzalloc(sizeof(struct nft_ctx));
 	nft_init(ctx);
@@ -562,13 +556,6 @@ static int nft_evaluate(struct nft_ctx *nft, struct list_head *msgs,
 
 	if (err < 0 || nft->state->nerrs)
 		return -1;
-
-	list_for_each_entry(cmd, cmds, list) {
-		if (cmd->op != CMD_ADD)
-			continue;
-
-		nft_cmd_post_expand(cmd);
-	}
 
 	return 0;
 }

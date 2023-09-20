@@ -11,7 +11,6 @@
 
 #include <nft.h>
 
-#include <stdlib.h>
 #include <string.h>
 #include <limits.h>
 #include <linux/netfilter/nf_tables.h>
@@ -2769,7 +2768,7 @@ static void expr_postprocess(struct rule_pp_ctx *ctx, struct expr **exprp)
 		}
 		ctx->flags &= ~RULE_PP_IN_CONCATENATION;
 		list_splice(&tmp, &expr->expressions);
-		datatype_set(expr, concat_type_alloc(ntype));
+		__datatype_set(expr, concat_type_alloc(ntype));
 		break;
 	}
 	case EXPR_UNARY:
