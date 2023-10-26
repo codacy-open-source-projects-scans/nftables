@@ -163,9 +163,13 @@ usage() {
 	echo " -R|--without-realroot : Sets NFT_TEST_HAS_REALROOT=n."
 	echo " -U|--no-unshare : Sets NFT_TEST_UNSHARE_CMD=\"\"."
 	echo " -k|--keep-logs  : Sets NFT_TEST_KEEP_LOGS=y."
+	echo " -x              : Sets NFT_TEST_VERBOSE_TEST=y."
 	echo " -s|--sequential : Sets NFT_TEST_JOBS=0, which also enables global cleanups."
 	echo "                   Also sets NFT_TEST_SHUFFLE_TESTS=n if left unspecified."
 	echo " -Q|--quick      : Sets NFT_TEST_SKIP_slow=y."
+	echo " -S|--setup-host : Modify the host to run as rootless. Otherwise, some tests will be"
+	echo "                   skipped. Basically, this bumps /proc/sys/net/core/{wmem_max,rmem_max}."
+	echo "                   Must run as root and this option must be specified alone."
 	echo " --              : Separate options from tests."
 	echo " [TESTS...]      : Other options are treated as test names,"
 	echo "                   that is, executables that are run by the runner."
@@ -178,6 +182,8 @@ usage() {
 	echo " NFT_REAL=<CMD> : Real nft comand. Usually this is just the same as \$NFT,"
 	echo "                 however, you may set NFT='valgrind nft' and NFT_REAL to the real command."
 	echo " VERBOSE=*|y   : Enable verbose output."
+	echo " NFT_TEST_VERBOSE_TEST=*|y: if true, enable verbose output for tests. For bash scripts, this means"
+	echo "                 to pass \"-x\" to the interpreter."
 	echo " DUMPGEN=*|y   : Regenerate dump files. Dump files are only recreated if the"
 	echo "                 test completes successfully and the \"dumps\" directory for the"
 	echo "                 test exits."
@@ -217,6 +223,7 @@ usage() {
 	echo "                 Setting this to \"0\" means also to perform global cleanups between tests (remove"
 	echo "                 kernel modules)."
 	echo "                 Parallel jobs requires unshare and are disabled with NFT_TEST_UNSHARE_CMD=\"\"."
+	echo " NFT_TEST_FAIL_ON_SKIP=*|y: if any jobs are skipped, exit with error."
 	echo " NFT_TEST_RANDOM_SEED=<SEED>: The test runner will export the environment variable NFT_TEST_RANDOM_SEED"
 	echo "                 set to a random number. This can be used as a stable seed for tests to randomize behavior."
 	echo "                 Set this to a fixed value to get reproducible behavior."
@@ -271,12 +278,14 @@ _NFT_TEST_JOBS_DEFAULT="$(nproc)"
 _NFT_TEST_JOBS_DEFAULT="$(( _NFT_TEST_JOBS_DEFAULT + (_NFT_TEST_JOBS_DEFAULT + 1) / 2 ))"
 
 VERBOSE="$(bool_y "$VERBOSE")"
+NFT_TEST_VERBOSE_TEST="$(bool_y "$NFT_TEST_VERBOSE_TEST")"
 DUMPGEN="$(bool_y "$DUMPGEN")"
 VALGRIND="$(bool_y "$VALGRIND")"
 KMEMLEAK="$(bool_y "$KMEMLEAK")"
 NFT_TEST_KEEP_LOGS="$(bool_y "$NFT_TEST_KEEP_LOGS")"
 NFT_TEST_HAS_REALROOT="$NFT_TEST_HAS_REALROOT"
 NFT_TEST_JOBS="${NFT_TEST_JOBS:-$_NFT_TEST_JOBS_DEFAULT}"
+NFT_TEST_FAIL_ON_SKIP="$(bool_y "$NFT_TEST_FAIL_ON_SKIP")"
 NFT_TEST_RANDOM_SEED="$NFT_TEST_RANDOM_SEED"
 NFT_TEST_SHUFFLE_TESTS="$NFT_TEST_SHUFFLE_TESTS"
 NFT_TEST_SKIP_slow="$(bool_y "$NFT_TEST_SKIP_slow")"
@@ -300,12 +309,30 @@ export NFT_TEST_RANDOM_SEED
 
 TESTS=()
 
+SETUP_HOST=
+SETUP_HOST_OTHER=
+
+ARGV_ORIG=( "$@" )
+
 while [ $# -gt 0 ] ; do
 	A="$1"
 	shift
 	case "$A" in
+		-S|--setup-host)
+			;;
+		*)
+			SETUP_HOST_OTHER=y
+			;;
+	esac
+	case "$A" in
+		-S|--setup-host)
+			SETUP_HOST="$A"
+			;;
 		-v)
 			VERBOSE=y
+			;;
+		-x)
+			NFT_TEST_VERBOSE_TEST=y
 			;;
 		-g)
 			DUMPGEN=y
@@ -350,6 +377,34 @@ while [ $# -gt 0 ] ; do
 			;;
 	esac
 done
+
+sysctl_bump() {
+	local sysctl="$1"
+	local val="$2"
+	local cur;
+
+	cur="$(cat "$sysctl" 2>/dev/null)" || :
+	if [ -n "$cur" -a "$cur" -ge "$val" ] ; then
+		echo "# Skip: echo $val > $sysctl (current value $cur)"
+		return 0
+	fi
+	echo "    echo $val > $sysctl (previous value $cur)"
+	echo "$val" > "$sysctl"
+}
+
+setup_host() {
+	echo "Setting up host for running as rootless (requires root)."
+	sysctl_bump /proc/sys/net/core/rmem_max $((4000*1024)) || return $?
+	sysctl_bump /proc/sys/net/core/wmem_max $((4000*1024)) || return $?
+}
+
+if [ -n "$SETUP_HOST" ] ; then
+	if [ "$SETUP_HOST_OTHER" = y ] ; then
+		msg_error "The $SETUP_HOST option must be specified alone."
+	fi
+	setup_host
+	exit $?
+fi
 
 find_tests() {
 	find "$1" -type f -executable | sort
@@ -579,6 +634,7 @@ exec &> >(tee "$NFT_TEST_TMPDIR/test.log")
 msg_info "conf: NFT=$(printf '%q' "$NFT")"
 msg_info "conf: NFT_REAL=$(printf '%q' "$NFT_REAL")"
 msg_info "conf: VERBOSE=$(printf '%q' "$VERBOSE")"
+msg_info "conf: NFT_TEST_VERBOSE_TEST=$(printf '%q' "$NFT_TEST_VERBOSE_TEST")"
 msg_info "conf: DUMPGEN=$(printf '%q' "$DUMPGEN")"
 msg_info "conf: VALGRIND=$(printf '%q' "$VALGRIND")"
 msg_info "conf: KMEMLEAK=$(printf '%q' "$KMEMLEAK")"
@@ -590,6 +646,7 @@ msg_info "conf: NFT_TEST_HAS_UNSHARED=$(printf '%q' "$NFT_TEST_HAS_UNSHARED")"
 msg_info "conf: NFT_TEST_HAS_UNSHARED_MOUNT=$(printf '%q' "$NFT_TEST_HAS_UNSHARED_MOUNT")"
 msg_info "conf: NFT_TEST_KEEP_LOGS=$(printf '%q' "$NFT_TEST_KEEP_LOGS")"
 msg_info "conf: NFT_TEST_JOBS=$NFT_TEST_JOBS"
+msg_info "conf: NFT_TEST_FAIL_ON_SKIP=$NFT_TEST_FAIL_ON_SKIP"
 msg_info "conf: NFT_TEST_RANDOM_SEED=$NFT_TEST_RANDOM_SEED"
 msg_info "conf: NFT_TEST_SHUFFLE_TESTS=$NFT_TEST_SHUFFLE_TESTS"
 msg_info "conf: TMPDIR=$(printf '%q' "$_TMPDIR")"
@@ -783,7 +840,12 @@ job_start() {
 	fi
 
 	NFT_TEST_TESTTMPDIR="${JOBS_TEMPDIR["$testfile"]}" \
-	NFT="$NFT" NFT_REAL="$NFT_REAL" DIFF="$DIFF" DUMPGEN="$DUMPGEN" $NFT_TEST_UNSHARE_CMD "$NFT_TEST_BASEDIR/helpers/test-wrapper.sh" "$testfile"
+	NFT="$NFT" \
+	NFT_REAL="$NFT_REAL" \
+	DIFF="$DIFF" \
+	DUMPGEN="$DUMPGEN" \
+	NFT_TEST_VERBOSE_TEST="$NFT_TEST_VERBOSE_TEST" \
+	$NFT_TEST_UNSHARE_CMD "$NFT_TEST_BASEDIR/helpers/test-wrapper.sh" "$testfile"
 	local rc_got=$?
 
 	if [ "$NFT_TEST_JOBS" -le 1 ] ; then
@@ -847,7 +909,12 @@ echo ""
 kmemleak_found=0
 check_kmemleak_force
 
-if [ "$failed" -gt 0 ] ; then
+failed_total="$failed"
+if [ "$NFT_TEST_FAIL_ON_SKIP" = y ] ; then
+	failed_total="$((failed_total + skipped))"
+fi
+
+if [ "$failed_total" -gt 0 ] ; then
 	RR="$RED"
 elif [ "$skipped" -gt 0 ] ; then
 	RR="$YELLOW"
@@ -872,7 +939,7 @@ END_TIME="$(cut -d ' ' -f1 /proc/uptime)"
 WALL_TIME="$(awk -v start="$START_TIME" -v end="$END_TIME" "BEGIN { print(end - start) }")"
 printf "%s\n" "$WALL_TIME" "$START_TIME" "$END_TIME" > "$NFT_TEST_TMPDIR/times"
 
-if [ "$failed" -gt 0 -o "$NFT_TEST_KEEP_LOGS" = y ] ; then
+if [ "$failed_total" -gt 0 -o "$NFT_TEST_KEEP_LOGS" = y ] ; then
 	msg_info "check the temp directory \"$NFT_TEST_TMPDIR\" (\"$NFT_TEST_LATEST\")"
 	msg_info "   ls -lad \"$NFT_TEST_LATEST\"/*/*"
 	msg_info "   grep -R ^ \"$NFT_TEST_LATEST\"/"
@@ -880,6 +947,9 @@ if [ "$failed" -gt 0 -o "$NFT_TEST_KEEP_LOGS" = y ] ; then
 fi
 
 if [ "$failed" -gt 0 ] ; then
+	exit 1
+elif [ "$NFT_TEST_FAIL_ON_SKIP" = y -a "$skipped" -gt 0 ] ; then
+	msg_info "some tests were skipped. Fail due to NFT_TEST_FAIL_ON_SKIP=y"
 	exit 1
 elif [ "$ok" -eq 0 -a "$skipped" -gt 0 ] ; then
 	exit 77

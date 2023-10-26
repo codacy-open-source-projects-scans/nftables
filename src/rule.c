@@ -12,7 +12,6 @@
 
 #include <stddef.h>
 #include <stdio.h>
-#include <string.h>
 #include <inttypes.h>
 #include <errno.h>
 
@@ -2745,10 +2744,8 @@ static void stmt_reduce(const struct rule *rule)
 
 		/* Must not merge across other statements */
 		if (stmt->ops->type != STMT_EXPRESSION) {
-			if (idx < 2)
-				continue;
-
-			payload_do_merge(sa, idx);
+			if (idx >= 2)
+				payload_do_merge(sa, idx);
 			idx = 0;
 			continue;
 		}

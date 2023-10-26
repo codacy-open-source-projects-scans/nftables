@@ -10,7 +10,6 @@
 
 #include <nft.h>
 
-#include <string.h>
 #include <inttypes.h>
 #include <ctype.h> /* isdigit */
 #include <errno.h>
@@ -65,6 +64,7 @@ static const struct datatype *datatypes[TYPE_MAX + 1] = {
 	[TYPE_CT_DIR]		= &ct_dir_type,
 	[TYPE_CT_STATUS]	= &ct_status_type,
 	[TYPE_ICMP6_TYPE]	= &icmp6_type_type,
+	[TYPE_CT_LABEL]		= &ct_label_type,
 	[TYPE_PKTTYPE]		= &pkttype_type,
 	[TYPE_ICMP_CODE]	= &icmp_code_type,
 	[TYPE_ICMPV6_CODE]	= &icmpv6_code_type,
@@ -74,6 +74,7 @@ static const struct datatype *datatypes[TYPE_MAX + 1] = {
 	[TYPE_ECN]		= &ecn_type,
 	[TYPE_FIB_ADDR]         = &fib_addr_type,
 	[TYPE_BOOLEAN]		= &boolean_type,
+	[TYPE_CT_EVENTBIT]	= &ct_event_type,
 	[TYPE_IFNAME]		= &ifname_type,
 	[TYPE_IGMP_TYPE]	= &igmp_type_type,
 	[TYPE_TIME_DATE]	= &date_type,
@@ -1209,7 +1210,7 @@ static struct datatype *datatype_alloc(void)
 	return dtype;
 }
 
-struct datatype *datatype_get(const struct datatype *ptr)
+const struct datatype *datatype_get(const struct datatype *ptr)
 {
 	struct datatype *dtype = (struct datatype *)ptr;
 
@@ -1241,7 +1242,7 @@ struct datatype *datatype_clone(const struct datatype *orig_dtype)
 {
 	struct datatype *dtype;
 
-	dtype = xzalloc(sizeof(*dtype));
+	dtype = xmalloc(sizeof(*dtype));
 	*dtype = *orig_dtype;
 	dtype->name = xstrdup(orig_dtype->name);
 	dtype->desc = xstrdup(orig_dtype->desc);
@@ -1308,7 +1309,7 @@ const struct datatype *concat_type_alloc(uint32_t type)
 }
 
 const struct datatype *set_datatype_alloc(const struct datatype *orig_dtype,
-					  unsigned int byteorder)
+					  enum byteorder byteorder)
 {
 	struct datatype *dtype;
 

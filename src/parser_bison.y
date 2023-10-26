@@ -16,6 +16,7 @@
 #include <stdio.h>
 #include <inttypes.h>
 #include <syslog.h>
+#include <net/if.h>
 #include <netinet/ip.h>
 #include <netinet/tcp.h>
 #include <netinet/if_ether.h>
@@ -158,7 +159,7 @@ static struct expr *ifname_expr_alloc(const struct location *location,
 		return NULL;
 	}
 
-	if (length > 16) {
+	if (length >= IFNAMSIZ) {
 		xfree(name);
 		erec_queue(error(location, "interface name too long"), queue);
 		return NULL;
@@ -422,6 +423,7 @@ int nft_lex(void *, void *, void *);
 %token ICMP6			"icmpv6"
 %token PPTR			"param-problem"
 %token MAXDELAY			"max-delay"
+%token TADDR			"taddr"
 
 %token AH			"ah"
 %token RESERVED			"reserved"
@@ -4522,6 +4524,12 @@ meter_key_expr_alloc	:	concat_expr
 
 set_elem_expr		:	set_elem_expr_alloc
 			|	set_elem_expr_alloc		set_elem_expr_options
+			|	set_elem_expr_alloc		set_elem_expr_options	set_elem_stmt_list
+			{
+				$$ = $1;
+				list_splice_tail($3, &$$->stmt_list);
+				xfree($3);
+			}
 			;
 
 set_elem_key_expr	:	set_lhs_expr		{ $$ = $1; }
@@ -5746,6 +5754,8 @@ icmp6_hdr_field		:	TYPE		close_scope_type	{ $$ = ICMP6HDR_TYPE; }
 			|	ID		{ $$ = ICMP6HDR_ID; }
 			|	SEQUENCE	{ $$ = ICMP6HDR_SEQ; }
 			|	MAXDELAY	{ $$ = ICMP6HDR_MAXDELAY; }
+			|	TADDR		{ $$ = ICMP6HDR_TADDR; }
+			|	DADDR		{ $$ = ICMP6HDR_DADDR; }
 			;
 
 auth_hdr_expr		:	AH	auth_hdr_field	close_scope_ah

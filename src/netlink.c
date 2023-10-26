@@ -11,7 +11,6 @@
 
 #include <nft.h>
 
-#include <string.h>
 #include <errno.h>
 #include <libmnl/libmnl.h>
 #include <netinet/in.h>
@@ -878,8 +877,8 @@ static struct expr *set_make_key(const struct nftnl_udata *attr)
 {
 	const struct nftnl_udata *ud[NFTNL_UDATA_SET_TYPEOF_MAX + 1] = {};
 	const struct expr_ops *ops;
-	enum expr_types etype;
 	struct expr *expr;
+	uint32_t etype;
 	int err;
 
 	if (!attr)
@@ -895,7 +894,9 @@ static struct expr *set_make_key(const struct nftnl_udata *attr)
 		return NULL;
 
 	etype = nftnl_udata_get_u32(ud[NFTNL_UDATA_SET_TYPEOF_EXPR]);
-	ops = expr_ops_by_type(etype);
+	ops = expr_ops_by_type_u32(etype);
+	if (!ops)
+		return NULL;
 
 	expr = ops->parse_udata(ud[NFTNL_UDATA_SET_TYPEOF_DATA]);
 	if (!expr)

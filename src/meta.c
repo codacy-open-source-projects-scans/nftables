@@ -16,7 +16,6 @@
 #include <limits.h>
 #include <stddef.h>
 #include <stdio.h>
-#include <string.h>
 #include <net/if.h>
 #include <net/if_arp.h>
 #include <pwd.h>
@@ -968,8 +967,8 @@ struct stmt *meta_stmt_alloc(const struct location *loc, enum nft_meta_keys key,
 	stmt->meta.key	= key;
 	stmt->meta.expr	= expr;
 
-        if (key < array_size(meta_templates))
-                stmt->meta.tmpl = &meta_templates[key];
+	if (key < array_size(meta_templates))
+		stmt->meta.tmpl = &meta_templates[key];
 
 	return stmt;
 }

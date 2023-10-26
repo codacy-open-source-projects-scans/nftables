@@ -12,7 +12,6 @@
 
 #include <stddef.h>
 #include <stdio.h>
-#include <string.h>
 #include <arpa/inet.h>
 #include <linux/netfilter.h>
 #include <linux/netfilter_arp.h>
@@ -1340,8 +1339,8 @@ static int expr_evaluate_bitwise(struct eval_ctx *ctx, struct expr **expr)
 {
 	struct expr *op = *expr, *left = op->left;
 	const struct datatype *dtype;
+	enum byteorder byteorder;
 	unsigned int max_len;
-	int byteorder;
 
 	if (ctx->stmt_len > left->len) {
 		max_len = ctx->stmt_len;
@@ -1512,6 +1511,12 @@ static int expr_evaluate_concat(struct eval_ctx *ctx, struct expr **expr)
 
 		if (list_member_evaluate(ctx, &i) < 0)
 			return -1;
+
+		if (i->etype == EXPR_SET)
+			return expr_error(ctx->msgs, i,
+					  "cannot use %s in concatenation",
+					  expr_name(i));
+
 		flags &= i->flags;
 
 		if (!key && i->dtype->type == TYPE_INTEGER) {
@@ -2481,7 +2486,7 @@ static int expr_evaluate_relational(struct eval_ctx *ctx, struct expr **expr)
 			    right->dtype->basetype == NULL ||
 			    right->dtype->basetype->type != TYPE_BITMASK)
 				return expr_binary_error(ctx->msgs, left, right,
-							 "negation can only be used with singleton bitmask values");
+							 "negation can only be used with singleton bitmask values.  Did you mean \"!=\"?");
 		}
 
 		switch (right->etype) {
@@ -4176,8 +4181,13 @@ static int stmt_evaluate_log_prefix(struct eval_ctx *ctx, struct stmt *stmt)
 	size_t offset = 0;
 	struct expr *expr;
 
-	if (stmt->log.prefix->etype != EXPR_LIST)
+	if (stmt->log.prefix->etype != EXPR_LIST) {
+		if (stmt->log.prefix &&
+		    div_round_up(stmt->log.prefix->len, BITS_PER_BYTE) >= NF_LOG_PREFIXLEN)
+			return expr_error(ctx->msgs, stmt->log.prefix, "log prefix is too long");
+
 		return 0;
+	}
 
 	prefix[0] = '\0';
 
