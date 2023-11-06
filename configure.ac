@@ -117,22 +117,6 @@ AC_CHECK_DECLS([getprotobyname_r, getprotobynumber_r, getservbyport_r], [], [], 
 AC_CONFIG_FILES([					\
 		Makefile				\
 		libnftables.pc				\
-		src/Makefile				\
-		include/Makefile			\
-		include/nftables/Makefile		\
-		include/linux/Makefile			\
-		include/linux/netfilter/Makefile	\
-		include/linux/netfilter_arp/Makefile	\
-		include/linux/netfilter_bridge/Makefile	\
-		include/linux/netfilter_ipv4/Makefile	\
-		include/linux/netfilter_ipv6/Makefile	\
-		files/Makefile				\
-		files/examples/Makefile			\
-		files/nftables/Makefile			\
-		files/osf/Makefile			\
-		doc/Makefile				\
-		py/Makefile				\
-		examples/Makefile			\
 		])
 AC_OUTPUT
 
