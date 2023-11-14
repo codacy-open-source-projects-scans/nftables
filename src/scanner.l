@@ -1261,8 +1261,8 @@ void *scanner_init(struct parser_state *state)
 static void input_descriptor_destroy(const struct input_descriptor *indesc)
 {
 	if (indesc->name)
-		xfree(indesc->name);
-	xfree(indesc);
+		free_const(indesc->name);
+	free_const(indesc);
 }
 
 static void input_descriptor_list_destroy(struct parser_state *state)
@@ -1284,7 +1284,7 @@ void scanner_destroy(struct nft_ctx *nft)
 	struct parser_state *state = yyget_extra(nft->scanner);
 
 	input_descriptor_list_destroy(state);
-	xfree(state->startcond_active);
+	free(state->startcond_active);
 
 	yylex_destroy(nft->scanner);
 }

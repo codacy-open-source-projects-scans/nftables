@@ -51,7 +51,7 @@ void stmt_free(struct stmt *stmt)
 		return;
 	if (stmt->ops->destroy)
 		stmt->ops->destroy(stmt);
-	xfree(stmt);
+	free(stmt);
 }
 
 void stmt_list_free(struct list_head *list)
@@ -183,7 +183,7 @@ static void meter_stmt_destroy(struct stmt *stmt)
 	expr_free(stmt->meter.key);
 	expr_free(stmt->meter.set);
 	stmt_free(stmt->meter.stmt);
-	xfree(stmt->meter.name);
+	free_const(stmt->meter.name);
 }
 
 static const struct stmt_ops meter_stmt_ops = {

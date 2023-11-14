@@ -400,7 +400,7 @@ static int expr_evaluate_integer(struct eval_ctx *ctx, struct expr **exprp)
 		expr_error(ctx->msgs, expr,
 			   "Value %s exceeds valid range 0-%u",
 			   valstr, ctx->ectx.maxval);
-		free(valstr);
+		nft_gmp_free(valstr);
 		return -1;
 	}
 
@@ -416,8 +416,8 @@ static int expr_evaluate_integer(struct eval_ctx *ctx, struct expr **exprp)
 		expr_error(ctx->msgs, expr,
 			   "Value %s exceeds valid range 0-%s",
 			   valstr, rangestr);
-		free(valstr);
-		free(rangestr);
+		nft_gmp_free(valstr);
+		nft_gmp_free(rangestr);
 		mpz_clear(mask);
 		return -1;
 	}
@@ -545,7 +545,8 @@ static void expr_evaluate_bits(struct eval_ctx *ctx, struct expr **exprp)
 	and->len	= masklen;
 
 	if (shift) {
-		if (ctx->stmt_len > 0 && div_round_up(masklen, BITS_PER_BYTE) > 1) {
+		if ((ctx->ectx.key || ctx->stmt_len > 0) &&
+		    div_round_up(masklen, BITS_PER_BYTE) > 1) {
 			int op = byteorder_conversion_op(expr, BYTEORDER_HOST_ENDIAN);
 			and = unary_expr_alloc(&expr->location, op, and);
 			and->len = masklen;
@@ -574,6 +575,7 @@ static void expr_evaluate_bits(struct eval_ctx *ctx, struct expr **exprp)
 
 static int __expr_evaluate_exthdr(struct eval_ctx *ctx, struct expr **exprp)
 {
+	const struct expr *key = ctx->ectx.key;
 	struct expr *expr = *exprp;
 
 	if (expr->exthdr.flags & NFT_EXTHDR_F_PRESENT)
@@ -581,6 +583,8 @@ static int __expr_evaluate_exthdr(struct eval_ctx *ctx, struct expr **exprp)
 
 	if (expr_evaluate_primary(ctx, exprp) < 0)
 		return -1;
+
+	ctx->ectx.key = key;
 
 	if (expr->exthdr.offset % BITS_PER_BYTE != 0 ||
 	    expr->len % BITS_PER_BYTE != 0)
@@ -878,6 +882,7 @@ static bool payload_needs_adjustment(const struct expr *expr)
 
 static int expr_evaluate_payload(struct eval_ctx *ctx, struct expr **exprp)
 {
+	const struct expr *key = ctx->ectx.key;
 	struct expr *expr = *exprp;
 
 	if (expr->payload.evaluated)
@@ -888,6 +893,8 @@ static int expr_evaluate_payload(struct eval_ctx *ctx, struct expr **exprp)
 
 	if (expr_evaluate_primary(ctx, exprp) < 0)
 		return -1;
+
+	ctx->ectx.key = key;
 
 	if (payload_needs_adjustment(expr))
 		expr_evaluate_bits(ctx, exprp);
@@ -1508,6 +1515,7 @@ static int expr_evaluate_concat(struct eval_ctx *ctx, struct expr **expr)
 		}
 
 		__expr_set_context(&ctx->ectx, tmp, bo, dsize, 0);
+		ctx->ectx.key = i;
 
 		if (list_member_evaluate(ctx, &i) < 0)
 			return -1;
@@ -1918,13 +1926,13 @@ static int expr_evaluate_map(struct eval_ctx *ctx, struct expr **expr)
 	}
 
 	expr_set_context(&ctx->ectx, NULL, 0);
-	ctx->stmt_len = 0;
 	if (expr_evaluate(ctx, &map->map) < 0)
 		return -1;
 	if (expr_is_constant(map->map))
 		return expr_error(ctx->msgs, map->map,
 				  "Map expression can not be constant");
 
+	ctx->stmt_len = 0;
 	mappings = map->mappings;
 	mappings->set_flags |= NFT_SET_MAP;
 
@@ -3246,7 +3254,7 @@ static int stmt_reject_gen_dependency(struct eval_ctx *ctx, struct stmt *stmt,
 	 */
 	list_add(&nstmt->list, &ctx->rule->stmts);
 out:
-	xfree(payload);
+	free(payload);
 	return ret;
 }
 
@@ -4019,7 +4027,7 @@ static int stmt_evaluate_chain(struct eval_ctx *ctx, struct stmt *stmt)
 		memset(&h, 0, sizeof(h));
 		handle_merge(&h, &chain->handle);
 		h.family = ctx->rule->handle.family;
-		xfree(h.table.name);
+		free_const(h.table.name);
 		h.table.name = xstrdup(ctx->rule->handle.table.name);
 		h.chain.location = stmt->location;
 		h.chain_id = chain->handle.chain_id;
@@ -4039,9 +4047,9 @@ static int stmt_evaluate_chain(struct eval_ctx *ctx, struct stmt *stmt)
 			struct handle h2 = {};
 
 			handle_merge(&rule->handle, &ctx->rule->handle);
-			xfree(rule->handle.table.name);
+			free_const(rule->handle.table.name);
 			rule->handle.table.name = xstrdup(ctx->rule->handle.table.name);
-			xfree(rule->handle.chain.name);
+			free_const(rule->handle.chain.name);
 			rule->handle.chain.name = NULL;
 			rule->handle.chain_id = chain->handle.chain_id;
 			if (rule_evaluate(&rule_ctx, rule, CMD_INVALID) < 0)
@@ -5144,8 +5152,8 @@ static int ct_timeout_evaluate(struct eval_ctx *ctx, struct obj *obj)
 
 		ct->timeout[ts->timeout_index] = ts->timeout_value;
 		list_del(&ts->head);
-		xfree(ts->timeout_str);
-		xfree(ts);
+		free_const(ts->timeout_str);
+		free(ts);
 	}
 
 	return 0;

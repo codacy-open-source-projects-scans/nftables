@@ -94,7 +94,7 @@ void expr_free(struct expr *expr)
 	 */
 	if (expr->etype != EXPR_INVALID)
 		expr_destroy(expr);
-	xfree(expr);
+	free(expr);
 }
 
 void expr_print(const struct expr *expr, struct output_ctx *octx)
@@ -314,7 +314,7 @@ static void symbol_expr_clone(struct expr *new, const struct expr *expr)
 
 static void symbol_expr_destroy(struct expr *expr)
 {
-	xfree(expr->identifier);
+	free_const(expr->identifier);
 }
 
 static const struct expr_ops symbol_expr_ops = {
@@ -1335,7 +1335,7 @@ static void set_elem_expr_destroy(struct expr *expr)
 {
 	struct stmt *stmt, *next;
 
-	xfree(expr->comment);
+	free_const(expr->comment);
 	expr_free(expr->key);
 	list_for_each_entry_safe(stmt, next, &expr->stmt_list, list)
 		stmt_free(stmt);

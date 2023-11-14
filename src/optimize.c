@@ -1194,7 +1194,7 @@ static void merge_rules(const struct optimize_ctx *ctx,
 	}
 
 	if (ctx->rule[from]->comment) {
-		xfree(ctx->rule[from]->comment);
+		free_const(ctx->rule[from]->comment);
 		ctx->rule[from]->comment = NULL;
 	}
 
@@ -1347,16 +1347,16 @@ static int chain_optimize(struct nft_ctx *nft, struct list_head *rules)
 	}
 	ret = 0;
 	for (i = 0; i < ctx->num_rules; i++)
-		xfree(ctx->stmt_matrix[i]);
+		free(ctx->stmt_matrix[i]);
 
-	xfree(ctx->stmt_matrix);
-	xfree(merge);
+	free(ctx->stmt_matrix);
+	free(merge);
 err:
 	for (i = 0; i < ctx->num_stmts; i++)
 		stmt_free(ctx->stmt[i]);
 
-	xfree(ctx->rule);
-	xfree(ctx);
+	free(ctx->rule);
+	free(ctx);
 
 	return ret;
 }
