@@ -506,7 +506,7 @@ static uint8_t expr_offset_shift(const struct expr *expr, unsigned int offset,
 	return shift;
 }
 
-static void expr_evaluate_bits(struct eval_ctx *ctx, struct expr **exprp)
+static int expr_evaluate_bits(struct eval_ctx *ctx, struct expr **exprp)
 {
 	struct expr *expr = *exprp, *and, *mask, *rshift, *off;
 	unsigned masklen, len = expr->len, extra_len = 0;
@@ -528,7 +528,10 @@ static void expr_evaluate_bits(struct eval_ctx *ctx, struct expr **exprp)
 	}
 
 	masklen = len + shift;
-	assert(masklen <= NFT_REG_SIZE * BITS_PER_BYTE);
+
+	if (masklen > NFT_REG_SIZE * BITS_PER_BYTE)
+		return expr_error(ctx->msgs, expr, "mask length %u exceeds allowed maximum of %u\n",
+				  masklen, NFT_REG_SIZE * BITS_PER_BYTE);
 
 	mpz_init2(bitmask, masklen);
 	mpz_bitmask(bitmask, len);
@@ -571,6 +574,8 @@ static void expr_evaluate_bits(struct eval_ctx *ctx, struct expr **exprp)
 
 	if (extra_len)
 		expr->len += extra_len;
+
+	return 0;
 }
 
 static int __expr_evaluate_exthdr(struct eval_ctx *ctx, struct expr **exprp)
@@ -587,8 +592,12 @@ static int __expr_evaluate_exthdr(struct eval_ctx *ctx, struct expr **exprp)
 	ctx->ectx.key = key;
 
 	if (expr->exthdr.offset % BITS_PER_BYTE != 0 ||
-	    expr->len % BITS_PER_BYTE != 0)
-		expr_evaluate_bits(ctx, exprp);
+	    expr->len % BITS_PER_BYTE != 0) {
+		int err = expr_evaluate_bits(ctx, exprp);
+
+		if (err)
+			return err;
+	}
 
 	switch (expr->exthdr.op) {
 	case NFT_EXTHDR_OP_TCPOPT: {
@@ -896,8 +905,12 @@ static int expr_evaluate_payload(struct eval_ctx *ctx, struct expr **exprp)
 
 	ctx->ectx.key = key;
 
-	if (payload_needs_adjustment(expr))
-		expr_evaluate_bits(ctx, exprp);
+	if (payload_needs_adjustment(expr)) {
+		int err = expr_evaluate_bits(ctx, exprp);
+
+		if (err)
+			return err;
+	}
 
 	expr->payload.evaluated = true;
 
@@ -1158,7 +1171,7 @@ static int expr_evaluate_prefix(struct eval_ctx *ctx, struct expr **expr)
 	base = prefix->prefix;
 	assert(expr_is_constant(base));
 
-	prefix->dtype	  = base->dtype;
+	prefix->dtype	  = datatype_get(base->dtype);
 	prefix->byteorder = base->byteorder;
 	prefix->len	  = base->len;
 	prefix->flags	 |= EXPR_F_CONSTANT;
@@ -1312,9 +1325,14 @@ static int constant_binop_simplify(struct eval_ctx *ctx, struct expr **expr)
 static int expr_evaluate_shift(struct eval_ctx *ctx, struct expr **expr)
 {
 	struct expr *op = *expr, *left = op->left, *right = op->right;
-	unsigned int shift = mpz_get_uint32(right->value);
-	unsigned int max_shift_len;
+	unsigned int shift, max_shift_len;
 
+	/* mpz_get_uint32 has assert() for huge values */
+	if (mpz_cmp_ui(right->value, UINT_MAX) > 0)
+		return expr_binary_error(ctx->msgs, right, left,
+					 "shifts exceeding %u bits are not supported", UINT_MAX);
+
+	shift = mpz_get_uint32(right->value);
 	if (ctx->stmt_len > left->len)
 		max_shift_len = ctx->stmt_len;
 	else
@@ -1433,8 +1451,11 @@ static int expr_evaluate_binop(struct eval_ctx *ctx, struct expr **expr)
 					 "for %s expressions",
 					 sym, expr_name(right));
 
-	/* The grammar guarantees this */
-	assert(datatype_equal(expr_basetype(left), expr_basetype(right)));
+	if (!datatype_equal(expr_basetype(left), expr_basetype(right)))
+		return expr_binary_error(ctx->msgs, left, op,
+					 "Binary operation (%s) with different base types "
+					 "(%s vs %s) is not supported",
+					 sym, expr_basetype(left)->name, expr_basetype(right)->name);
 
 	switch (op->op) {
 	case OP_LSHIFT:
@@ -1592,7 +1613,7 @@ static int expr_evaluate_list(struct eval_ctx *ctx, struct expr **expr)
 			return expr_error(ctx->msgs, i,
 					  "List member must be a constant "
 					  "value");
-		if (i->dtype->basetype->type != TYPE_BITMASK)
+		if (datatype_basetype(i->dtype)->type != TYPE_BITMASK)
 			return expr_error(ctx->msgs, i,
 					  "Basetype of type %s is not bitmask",
 					  i->dtype->desc);
@@ -1948,6 +1969,10 @@ static int expr_evaluate_map(struct eval_ctx *ctx, struct expr **expr)
 						  ctx->ectx.len, NULL);
 		}
 
+		if (!ectx.dtype)
+			return expr_error(ctx->msgs, map,
+					  "Implicit map expression without known datatype");
+
 		if (ectx.dtype->type == TYPE_VERDICT) {
 			data = verdict_expr_alloc(&netlink_location, 0, NULL);
 		} else {
@@ -2006,8 +2031,8 @@ static int expr_evaluate_map(struct eval_ctx *ctx, struct expr **expr)
 		/* symbol has been already evaluated to set reference */
 		break;
 	default:
-		BUG("invalid mapping expression %s\n",
-		    expr_name(map->mappings));
+		return expr_binary_error(ctx->msgs, map->mappings, map->map,
+					 "invalid mapping expression %s", expr_name(map->mappings));
 	}
 
 	if (!datatype_compatible(map->mappings->set->key->dtype, map->map->dtype))
@@ -3147,6 +3172,19 @@ static int stmt_evaluate_meta(struct eval_ctx *ctx, struct stmt *stmt)
 				stmt->meta.tmpl->byteorder,
 				&stmt->meta.expr);
 	ctx->stmt_len = 0;
+
+	if (ret < 0)
+		return ret;
+
+	switch (stmt->meta.expr->etype) {
+	case EXPR_RANGE:
+		ret = expr_error(ctx->msgs, stmt->meta.expr,
+				 "Meta expression cannot be a range");
+		break;
+	default:
+		break;
+
+	}
 
 	return ret;
 }
@@ -4310,6 +4348,10 @@ static int stmt_evaluate_map(struct eval_ctx *ctx, struct stmt *stmt)
 		return expr_error(ctx->msgs, stmt->map.set,
 				  "Expression does not refer to a set");
 
+	if (!set_is_map(stmt->map.set->set->flags))
+		return expr_error(ctx->msgs, stmt->map.set,
+				  "%s is not a map", stmt->map.set->set->handle.set.name);
+
 	if (stmt_evaluate_key(ctx, stmt,
 			      stmt->map.set->set->key->dtype,
 			      stmt->map.set->set->key->len,
@@ -4621,6 +4663,9 @@ static int elems_evaluate(struct eval_ctx *ctx, struct set *set)
 {
 	ctx->set = set;
 	if (set->init != NULL) {
+		if (set->key == NULL)
+			return set_error(ctx, set, "set definition does not specify key");
+
 		__expr_set_context(&ctx->ectx, set->key->dtype,
 				   set->key->byteorder, set->key->len, 0);
 		if (expr_evaluate(ctx, &set->init) < 0)
@@ -4648,6 +4693,12 @@ static int set_evaluate(struct eval_ctx *ctx, struct set *set)
 	struct stmt *stmt;
 	const char *type;
 
+	type = set_is_map(set->flags) ? "map" : "set";
+
+	if (set->key == NULL)
+		return set_error(ctx, set, "%s definition does not specify key",
+				 type);
+
 	if (!set_is_anonymous(set->flags)) {
 		table = table_cache_find(&ctx->nft->cache.table_cache,
 					 set->handle.table.name,
@@ -4670,8 +4721,6 @@ static int set_evaluate(struct eval_ctx *ctx, struct set *set)
 
 	if (!(set->flags & NFT_SET_INTERVAL) && set->automerge)
 		return set_error(ctx, set, "auto-merge only works with interval sets");
-
-	type = set_is_map(set->flags) ? "map" : "set";
 
 	if (set->key == NULL)
 		return set_error(ctx, set, "%s definition does not specify key",
