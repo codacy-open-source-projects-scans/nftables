@@ -454,6 +454,18 @@ static int expr_evaluate_primary(struct eval_ctx *ctx, struct expr **expr)
 	return 0;
 }
 
+int stmt_dependency_evaluate(struct eval_ctx *ctx, struct stmt *stmt)
+{
+	uint32_t stmt_len = ctx->stmt_len;
+
+	if (stmt_evaluate(ctx, stmt) < 0)
+		return stmt_error(ctx, stmt, "dependency statement is invalid");
+
+	ctx->stmt_len = stmt_len;
+
+	return 0;
+}
+
 static int
 conflict_resolution_gen_dependency(struct eval_ctx *ctx, int protocol,
 				   const struct expr *expr,
@@ -479,7 +491,7 @@ conflict_resolution_gen_dependency(struct eval_ctx *ctx, int protocol,
 
 	dep = relational_expr_alloc(&expr->location, OP_EQ, left, right);
 	stmt = expr_stmt_alloc(&dep->location, dep);
-	if (stmt_evaluate(ctx, stmt) < 0)
+	if (stmt_dependency_evaluate(ctx, stmt) < 0)
 		return expr_error(ctx->msgs, expr,
 					  "dependency statement is invalid");
 
@@ -705,9 +717,8 @@ static int meta_iiftype_gen_dependency(struct eval_ctx *ctx,
 				  "for this family");
 
 	nstmt = meta_stmt_meta_iiftype(&payload->location, type);
-	if (stmt_evaluate(ctx, nstmt) < 0)
-		return expr_error(ctx->msgs, payload,
-				  "dependency statement is invalid");
+	if (stmt_dependency_evaluate(ctx, nstmt) < 0)
+		return -1;
 
 	if (ctx->inner_desc)
 		nstmt->expr->left->meta.inner_desc = ctx->inner_desc;
@@ -818,6 +829,7 @@ static int __expr_evaluate_payload(struct eval_ctx *ctx, struct expr *expr)
 						  desc->name,
 						  payload->payload.desc->name);
 
+			assert(pctx->stacked_ll_count);
 			payload->payload.offset += pctx->stacked_ll[0]->length;
 			rule_stmt_insert_at(ctx->rule, nstmt, ctx->stmt);
 			return 1;
@@ -1579,6 +1591,10 @@ static int expr_evaluate_concat(struct eval_ctx *ctx, struct expr **expr)
 		}
 
 		ctx->inner_desc = NULL;
+
+		if (size > NFT_MAX_EXPR_LEN_BITS)
+			return expr_error(ctx->msgs, i, "Concatenation of size %u exceeds maximum size of %u",
+					  size, NFT_MAX_EXPR_LEN_BITS);
 	}
 
 	(*expr)->flags |= flags;
@@ -2029,6 +2045,9 @@ static int expr_evaluate_map(struct eval_ctx *ctx, struct expr **expr)
 		break;
 	case EXPR_SET_REF:
 		/* symbol has been already evaluated to set reference */
+		if (!set_is_map(mappings->set->flags))
+			return expr_error(ctx->msgs, map->mappings,
+					  "Expression is not a map");
 		break;
 	default:
 		return expr_binary_error(ctx->msgs, map->mappings, map->map,
@@ -2726,6 +2745,35 @@ static int expr_evaluate_flagcmp(struct eval_ctx *ctx, struct expr **exprp)
 	return expr_evaluate(ctx, exprp);
 }
 
+static int verdict_validate_chainlen(struct eval_ctx *ctx,
+				     struct expr *chain)
+{
+	if (chain->len > NFT_CHAIN_MAXNAMELEN * BITS_PER_BYTE)
+		return expr_error(ctx->msgs, chain,
+				  "chain name too long (%u, max %u)",
+				  chain->len / BITS_PER_BYTE,
+				  NFT_CHAIN_MAXNAMELEN);
+
+	return 0;
+}
+
+static int expr_evaluate_verdict(struct eval_ctx *ctx, struct expr **exprp)
+{
+	struct expr *expr = *exprp;
+
+	switch (expr->verdict) {
+	case NFT_GOTO:
+	case NFT_JUMP:
+		if (expr->chain->etype == EXPR_VALUE &&
+		    verdict_validate_chainlen(ctx, expr->chain))
+			return -1;
+
+		break;
+	}
+
+	return expr_evaluate_primary(ctx, exprp);
+}
+
 static int expr_evaluate(struct eval_ctx *ctx, struct expr **expr)
 {
 	if (ctx->nft->debug_mask & NFT_DEBUG_EVALUATION) {
@@ -2751,7 +2799,7 @@ static int expr_evaluate(struct eval_ctx *ctx, struct expr **expr)
 	case EXPR_EXTHDR:
 		return expr_evaluate_exthdr(ctx, expr);
 	case EXPR_VERDICT:
-		return expr_evaluate_primary(ctx, expr);
+		return expr_evaluate_verdict(ctx, expr);
 	case EXPR_META:
 		return expr_evaluate_meta(ctx, expr);
 	case EXPR_SOCKET:
@@ -2952,6 +3000,9 @@ static int stmt_evaluate_verdict(struct eval_ctx *ctx, struct stmt *stmt)
 				return expr_error(ctx->msgs, stmt->expr->chain,
 						  "not a value expression");
 			}
+
+			if (verdict_validate_chainlen(ctx, stmt->expr->chain))
+				return -1;
 		}
 		break;
 	case EXPR_MAP:
@@ -2977,14 +3028,27 @@ static bool stmt_evaluate_payload_need_csum(const struct expr *payload)
 static int stmt_evaluate_exthdr(struct eval_ctx *ctx, struct stmt *stmt)
 {
 	struct expr *exthdr;
+	int ret;
 
 	if (__expr_evaluate_exthdr(ctx, &stmt->exthdr.expr) < 0)
 		return -1;
 
 	exthdr = stmt->exthdr.expr;
-	return stmt_evaluate_arg(ctx, stmt, exthdr->dtype, exthdr->len,
-				 BYTEORDER_BIG_ENDIAN,
-				 &stmt->exthdr.val);
+	ret = stmt_evaluate_arg(ctx, stmt, exthdr->dtype, exthdr->len,
+				BYTEORDER_BIG_ENDIAN,
+				&stmt->exthdr.val);
+	if (ret < 0)
+		return ret;
+
+	switch (stmt->exthdr.val->etype) {
+	case EXPR_RANGE:
+		return expr_error(ctx->msgs, stmt->exthdr.val,
+				   "cannot be a range");
+	default:
+		break;
+	}
+
+	return 0;
 }
 
 static int stmt_evaluate_payload(struct eval_ctx *ctx, struct stmt *stmt)
@@ -3171,8 +3235,6 @@ static int stmt_evaluate_meta(struct eval_ctx *ctx, struct stmt *stmt)
 				stmt->meta.tmpl->len,
 				stmt->meta.tmpl->byteorder,
 				&stmt->meta.expr);
-	ctx->stmt_len = 0;
-
 	if (ret < 0)
 		return ret;
 
@@ -3200,8 +3262,6 @@ static int stmt_evaluate_ct(struct eval_ctx *ctx, struct stmt *stmt)
 				stmt->ct.tmpl->len,
 				stmt->ct.tmpl->byteorder,
 				&stmt->ct.expr);
-	ctx->stmt_len = 0;
-
 	if (ret < 0)
 		return -1;
 
@@ -3547,6 +3607,13 @@ static int stmt_evaluate_reject_icmp(struct eval_ctx *ctx, struct stmt *stmt)
 		erec_queue(erec, ctx->msgs);
 		return -1;
 	}
+
+	if (mpz_cmp_ui(code->value, UINT8_MAX) > 0) {
+		expr_free(code);
+		return expr_error(ctx->msgs, stmt->reject.expr,
+				  "reject code must be integer in range 0-255");
+	}
+
 	stmt->reject.icmp_code = mpz_get_uint8(code->value);
 	expr_free(code);
 
@@ -3928,6 +3995,12 @@ static bool nat_concat_map(struct eval_ctx *ctx, struct stmt *stmt)
 		/* expr_evaluate_map() see EXPR_SET_REF after this evaluation. */
 		if (expr_evaluate(ctx, &stmt->nat.addr->mappings))
 			return false;
+
+		if (!set_is_datamap(stmt->nat.addr->mappings->set->flags)) {
+			expr_error(ctx->msgs, stmt->nat.addr->mappings,
+					  "Expression is not a map");
+			return false;
+		}
 
 		if (stmt->nat.addr->mappings->set->data->etype == EXPR_CONCAT ||
 		    stmt->nat.addr->mappings->set->data->dtype->subtypes) {
@@ -4497,6 +4570,8 @@ int stmt_evaluate(struct eval_ctx *ctx, struct stmt *stmt)
 		erec_destroy(erec);
 	}
 
+	ctx->stmt_len = 0;
+
 	switch (stmt->ops->type) {
 	case STMT_CONNLIMIT:
 	case STMT_COUNTER:
@@ -4637,16 +4712,21 @@ static int set_expr_evaluate_concat(struct eval_ctx *ctx, struct expr **expr)
 						 "expressions",
 						 i->dtype->name);
 
-		if (i->dtype->size)
-			assert(i->len == i->dtype->size);
-
 		flags &= i->flags;
 
 		ntype = concat_subtype_add(ntype, i->dtype->type);
 
 		dsize_bytes = div_round_up(i->len, BITS_PER_BYTE);
+
+		if (i->dtype->size)
+			assert(dsize_bytes == div_round_up(i->dtype->size, BITS_PER_BYTE));
+
 		(*expr)->field_len[(*expr)->field_count++] = dsize_bytes;
 		size += netlink_padded_len(i->len);
+
+		if (size > NFT_MAX_EXPR_LEN_BITS)
+			return expr_error(ctx->msgs, i, "Concatenation of size %u exceeds maximum size of %u",
+					  size, NFT_MAX_EXPR_LEN_BITS);
 	}
 
 	(*expr)->flags |= flags;
@@ -4817,7 +4897,7 @@ static bool evaluate_priority(struct eval_ctx *ctx, struct prio_spec *prio,
 			NFT_NAME_MAXLEN);
 	loc = prio->expr->location;
 
-	if (sscanf(prio_str, "%s %c %d", prio_fst, &op, &prio_snd) < 3) {
+	if (sscanf(prio_str, "%255s %c %d", prio_fst, &op, &prio_snd) < 3) {
 		priority = std_prio_lookup(prio_str, family, hook);
 		if (priority == NF_IP_PRI_LAST)
 			return false;

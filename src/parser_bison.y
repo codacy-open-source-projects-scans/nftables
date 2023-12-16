@@ -708,6 +708,8 @@ int nft_lex(void *, void *, void *);
 %type <val>			family_spec family_spec_explicit
 %type <val32>			int_num	chain_policy
 %type <prio_spec>		extended_prio_spec prio_spec
+%destructor { expr_free($$.expr); } extended_prio_spec prio_spec
+
 %type <string>			extended_prio_name quota_unit	basehook_device_name
 %destructor { free_const($$); }	extended_prio_name quota_unit	basehook_device_name
 
@@ -744,6 +746,9 @@ int nft_lex(void *, void *, void *);
 %destructor { stmt_free($$); }	stmt match_stmt verdict_stmt set_elem_stmt
 %type <stmt>			counter_stmt counter_stmt_alloc stateful_stmt last_stmt
 %destructor { stmt_free($$); }	counter_stmt counter_stmt_alloc stateful_stmt last_stmt
+%type <stmt>			objref_stmt objref_stmt_counter objref_stmt_limit objref_stmt_quota objref_stmt_ct objref_stmt_synproxy
+%destructor { stmt_free($$); }	objref_stmt objref_stmt_counter objref_stmt_limit objref_stmt_quota objref_stmt_ct objref_stmt_synproxy
+
 %type <stmt>			payload_stmt
 %destructor { stmt_free($$); }	payload_stmt
 %type <stmt>			ct_stmt
@@ -1392,6 +1397,7 @@ delete_cmd		:	TABLE		table_or_id_spec
 			{
 				$5->location = @5;
 				handle_merge(&$3->handle, &$2);
+				close_scope(state);
 				$$ = cmd_alloc(CMD_DELETE, CMD_OBJ_CHAIN, &$2, &@$, $5);
 			}
 			|	RULE		ruleid_spec
@@ -1968,7 +1974,7 @@ table_block		:	/* empty */	{ $$ = $<table>-1; }
 				list_add_tail(&$4->list, &$1->objs);
 				$$ = $1;
 			}
-			|	table_block	CT	HELPER	obj_identifier  obj_block_alloc '{'     ct_helper_block     '}' close_scope_ct stmt_separator
+			|	table_block	CT	HELPER	obj_identifier  obj_block_alloc '{'     ct_helper_block     '}' stmt_separator close_scope_ct
 			{
 				$5->location = @4;
 				$5->type = NFT_OBJECT_CT_HELPER;
@@ -1977,7 +1983,7 @@ table_block		:	/* empty */	{ $$ = $<table>-1; }
 				list_add_tail(&$5->list, &$1->objs);
 				$$ = $1;
 			}
-			|	table_block	CT	TIMEOUT obj_identifier obj_block_alloc '{'	ct_timeout_block	'}' close_scope_ct stmt_separator
+			|	table_block	CT	TIMEOUT obj_identifier obj_block_alloc '{'	ct_timeout_block	'}' stmt_separator close_scope_ct
 			{
 				$5->location = @4;
 				$5->type = NFT_OBJECT_CT_TIMEOUT;
@@ -1986,7 +1992,7 @@ table_block		:	/* empty */	{ $$ = $<table>-1; }
 				list_add_tail(&$5->list, &$1->objs);
 				$$ = $1;
 			}
-			|	table_block	CT	EXPECTATION obj_identifier obj_block_alloc '{'	ct_expect_block	'}' close_scope_ct stmt_separator
+			|	table_block	CT	EXPECTATION obj_identifier obj_block_alloc '{'	ct_expect_block	'}' stmt_separator close_scope_ct
 			{
 				$5->location = @4;
 				$5->type = NFT_OBJECT_CT_EXPECT;
@@ -2510,6 +2516,7 @@ ct_timeout_block	:	/*empty */
 			{
 				$$ = $<obj>-1;
 				init_list_head(&$$->ct_timeout.timeout_list);
+				$$->type = NFT_OBJECT_CT_TIMEOUT;
 			}
 			|	ct_timeout_block     common_block
 			|	ct_timeout_block     stmt_separator
@@ -2610,6 +2617,9 @@ hook_spec		:	TYPE		close_scope_type	STRING		HOOK		STRING		dev_spec	prio_spec
 					erec_queue(error(&@3, "unknown chain type"),
 						   state->msgs);
 					free_const($3);
+					free_const($5);
+					expr_free($6);
+					expr_free($7.expr);
 					YYERROR;
 				}
 				$<chain>0->type.loc = @3;
@@ -2623,6 +2633,8 @@ hook_spec		:	TYPE		close_scope_type	STRING		HOOK		STRING		dev_spec	prio_spec
 					erec_queue(error(&@5, "unknown chain hook"),
 						   state->msgs);
 					free_const($5);
+					expr_free($6);
+					expr_free($7.expr);
 					YYERROR;
 				}
 				free_const($5);
@@ -3051,6 +3063,60 @@ stateful_stmt_list	:	stateful_stmt
 			}
 			;
 
+objref_stmt_counter	:	COUNTER		NAME	stmt_expr	close_scope_counter
+			{
+				$$ = objref_stmt_alloc(&@$);
+				$$->objref.type = NFT_OBJECT_COUNTER;
+				$$->objref.expr = $3;
+			}
+			;
+
+objref_stmt_limit	: 	LIMIT	NAME	stmt_expr	close_scope_limit
+			{
+				$$ = objref_stmt_alloc(&@$);
+				$$->objref.type = NFT_OBJECT_LIMIT;
+				$$->objref.expr = $3;
+			}
+			;
+
+objref_stmt_quota	:	QUOTA	NAME	stmt_expr	close_scope_quota
+			{
+				$$ = objref_stmt_alloc(&@$);
+				$$->objref.type = NFT_OBJECT_QUOTA;
+				$$->objref.expr = $3;
+			}
+			;
+
+objref_stmt_synproxy	: 	SYNPROXY	NAME	stmt_expr close_scope_synproxy
+			{
+				$$ = objref_stmt_alloc(&@$);
+				$$->objref.type = NFT_OBJECT_SYNPROXY;
+				$$->objref.expr = $3;
+			}
+			;
+
+objref_stmt_ct		:	CT	TIMEOUT		SET	stmt_expr	close_scope_ct
+			{
+				$$ = objref_stmt_alloc(&@$);
+				$$->objref.type = NFT_OBJECT_CT_TIMEOUT;
+				$$->objref.expr = $4;
+
+			}
+			|	CT	EXPECTATION	SET	stmt_expr	close_scope_ct
+			{
+				$$ = objref_stmt_alloc(&@$);
+				$$->objref.type = NFT_OBJECT_CT_EXPECT;
+				$$->objref.expr = $4;
+			}
+			;
+
+objref_stmt		:	objref_stmt_counter
+			|	objref_stmt_limit
+			|	objref_stmt_quota
+			|	objref_stmt_synproxy
+			|	objref_stmt_ct
+			;
+
 stateful_stmt		:	counter_stmt	close_scope_counter
 			|	limit_stmt
 			|	quota_stmt
@@ -3080,6 +3146,7 @@ stmt			:	verdict_stmt
 			|	chain_stmt
 			|	optstrip_stmt
 			|	xt_stmt		close_scope_xt
+			|	objref_stmt
 			;
 
 xt_stmt			:	XT	STRING	string
@@ -3169,12 +3236,6 @@ counter_stmt_alloc	:	COUNTER
 			{
 				$$ = counter_stmt_alloc(&@$);
 			}
-			|	COUNTER		NAME	stmt_expr
-			{
-				$$ = objref_stmt_alloc(&@$);
-				$$->objref.type = NFT_OBJECT_COUNTER;
-				$$->objref.expr = $3;
-			}
 			;
 
 counter_args		:	counter_arg
@@ -3186,10 +3247,12 @@ counter_args		:	counter_arg
 
 counter_arg		:	PACKETS			NUM
 			{
+				assert($<stmt>0->ops->type == STMT_COUNTER);
 				$<stmt>0->counter.packets = $2;
 			}
 			|	BYTES			NUM
 			{
+				assert($<stmt>0->ops->type == STMT_COUNTER);
 				$<stmt>0->counter.bytes	 = $2;
 			}
 			;
@@ -3470,12 +3533,6 @@ limit_stmt		:	LIMIT	RATE	limit_mode	limit_rate_pkts	limit_burst_pkts	close_scope
 				$$->limit.type	= NFT_LIMIT_PKT_BYTES;
 				$$->limit.flags = $3;
 			}
-			|	LIMIT	NAME	stmt_expr	close_scope_limit
-			{
-				$$ = objref_stmt_alloc(&@$);
-				$$->objref.type = NFT_OBJECT_LIMIT;
-				$$->objref.expr = $3;
-			}
 			;
 
 quota_mode		:	OVER		{ $$ = NFT_QUOTA_F_INV; }
@@ -3518,12 +3575,6 @@ quota_stmt		:	QUOTA	quota_mode NUM quota_unit quota_used	close_scope_quota
 				$$->quota.bytes	= $3 * rate;
 				$$->quota.used = $5;
 				$$->quota.flags	= $2;
-			}
-			|	QUOTA	NAME	stmt_expr	close_scope_quota
-			{
-				$$ = objref_stmt_alloc(&@$);
-				$$->objref.type = NFT_OBJECT_QUOTA;
-				$$->objref.expr = $3;
 			}
 			;
 
@@ -3714,12 +3765,6 @@ synproxy_stmt		:	synproxy_stmt_alloc
 synproxy_stmt_alloc	:	SYNPROXY
 			{
 				$$ = synproxy_stmt_alloc(&@$);
-			}
-			|	SYNPROXY	NAME	stmt_expr
-			{
-				$$ = objref_stmt_alloc(&@$);
-				$$->objref.type = NFT_OBJECT_SYNPROXY;
-				$$->objref.expr = $3;
 			}
 			;
 
@@ -4790,16 +4835,23 @@ ct_l4protoname		:	TCP	close_scope_tcp	{ $$ = IPPROTO_TCP; }
 			|	UDP	close_scope_udp	{ $$ = IPPROTO_UDP; }
 			;
 
-ct_helper_config		:	TYPE	QUOTED_STRING	PROTOCOL	ct_l4protoname	stmt_separator	close_scope_type
+ct_helper_config	:	TYPE	QUOTED_STRING	PROTOCOL	ct_l4protoname	stmt_separator	close_scope_type
 			{
 				struct ct_helper *ct;
 				int ret;
 
 				ct = &$<obj>0->ct_helper;
 
+				if (ct->l4proto) {
+					erec_queue(error(&@2, "You can only specify this once. This statement is already set for %s.", ct->name), state->msgs);
+					free_const($2);
+					YYERROR;
+				}
+
 				ret = snprintf(ct->name, sizeof(ct->name), "%s", $2);
 				if (ret <= 0 || ret >= (int)sizeof(ct->name)) {
 					erec_queue(error(&@2, "invalid name '%s', max length is %u\n", $2, (int)sizeof(ct->name)), state->msgs);
+					free_const($2);
 					YYERROR;
 				}
 				free_const($2);
@@ -5295,6 +5347,7 @@ meta_stmt		:	META	meta_key	SET	stmt_expr	close_scope_meta
 				free_const($2);
 				if (erec != NULL) {
 					erec_queue(erec, state->msgs);
+					expr_free($4);
 					YYERROR;
 				}
 
@@ -5533,19 +5586,6 @@ ct_stmt			:	CT	ct_key		SET	stmt_expr	close_scope_ct
 					break;
 				}
 			}
-			|	CT	TIMEOUT		SET	stmt_expr	close_scope_ct
-			{
-				$$ = objref_stmt_alloc(&@$);
-				$$->objref.type = NFT_OBJECT_CT_TIMEOUT;
-				$$->objref.expr = $4;
-
-			}
-			|	CT	EXPECTATION	SET	stmt_expr	close_scope_ct
-			{
-				$$ = objref_stmt_alloc(&@$);
-				$$->objref.type = NFT_OBJECT_CT_EXPECT;
-				$$->objref.expr = $4;
-			}
 			|	CT	ct_dir	ct_key_dir_optional SET	stmt_expr	close_scope_ct
 			{
 				$$ = ct_stmt_alloc(&@$, $3, $2, $5);
@@ -5587,6 +5627,13 @@ payload_expr		:	payload_raw_expr
 
 payload_raw_expr	:	AT	payload_base_spec	COMMA	NUM	COMMA	NUM	close_scope_at
 			{
+				if ($6 > NFT_MAX_EXPR_LEN_BITS) {
+					erec_queue(error(&@1, "raw payload length %u exceeds upper limit of %u",
+							 $6, NFT_MAX_EXPR_LEN_BITS),
+							 state->msgs);
+					YYERROR;
+				}
+
 				$$ = payload_expr_alloc(&@$, NULL, 0);
 				payload_init_raw($$, $2, $4, $6);
 				$$->byteorder		= BYTEORDER_BIG_ENDIAN;
