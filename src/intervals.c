@@ -13,6 +13,8 @@
 #include <intervals.h>
 #include <rule.h>
 
+static void set_to_range(struct expr *init);
+
 static void setelem_expr_to_range(struct expr *expr)
 {
 	unsigned char data[sizeof(struct in6_addr) * BITS_PER_BYTE];
@@ -26,6 +28,9 @@ static void setelem_expr_to_range(struct expr *expr)
 	case EXPR_RANGE:
 		break;
 	case EXPR_PREFIX:
+		if (expr->key->prefix->etype != EXPR_VALUE)
+			BUG("Prefix for unexpected type %d", expr->key->prefix->etype);
+
 		mpz_init(rop);
 		mpz_bitmask(rop, expr->key->len - expr->key->prefix_len);
 		if (expr_basetype(expr)->type == TYPE_STRING)
@@ -215,7 +220,7 @@ static struct expr *interval_expr_key(struct expr *i)
 	return elem;
 }
 
-void set_to_range(struct expr *init)
+static void set_to_range(struct expr *init)
 {
 	struct expr *i, *elem;
 
