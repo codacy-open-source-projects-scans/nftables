@@ -715,7 +715,8 @@ const struct datatype ip6addr_type = {
 static void inet_protocol_type_print(const struct expr *expr,
 				      struct output_ctx *octx)
 {
-	if (!nft_output_numeric_proto(octx)) {
+	if (!nft_output_numeric_proto(octx) &&
+	    mpz_cmp_ui(expr->value, UINT8_MAX) <= 0) {
 		char name[NFT_PROTONAME_MAXSIZE];
 
 		if (nft_getprotobynumber(mpz_get_uint8(expr->value), name, sizeof(name))) {
@@ -796,7 +797,8 @@ static void inet_service_print(const struct expr *expr, struct output_ctx *octx)
 
 void inet_service_type_print(const struct expr *expr, struct output_ctx *octx)
 {
-	if (nft_output_service(octx)) {
+	if (nft_output_service(octx) &&
+	    mpz_cmp_ui(expr->value, UINT16_MAX) <= 0) {
 		inet_service_print(expr, octx);
 		return;
 	}
@@ -855,19 +857,48 @@ const struct datatype inet_service_type = {
 
 #define RT_SYM_TAB_INITIAL_SIZE		16
 
+static FILE *open_iproute2_db(const char *filename, char **path)
+{
+	FILE *ret;
+
+	if (filename[0] == '/')
+		return fopen(filename, "r");
+
+	if (asprintf(path, "/etc/iproute2/%s", filename) == -1)
+		goto fail;
+
+	ret = fopen(*path, "r");
+	if (ret)
+		return ret;
+
+	free(*path);
+	if (asprintf(path, "/usr/share/iproute2/%s", filename) == -1)
+		goto fail;
+
+	ret = fopen(*path, "r");
+	if (ret)
+		return ret;
+
+	free(*path);
+fail:
+	*path = NULL;
+	return NULL;
+}
+
 struct symbol_table *rt_symbol_table_init(const char *filename)
 {
+	char buf[512], namebuf[512], *p, *path = NULL;
 	struct symbolic_constant s;
 	struct symbol_table *tbl;
 	unsigned int size, nelems, val;
-	char buf[512], namebuf[512], *p;
 	FILE *f;
 
 	size = RT_SYM_TAB_INITIAL_SIZE;
 	tbl = xmalloc(sizeof(*tbl) + size * sizeof(s));
+	tbl->base = BASE_DECIMAL;
 	nelems = 0;
 
-	f = fopen(filename, "r");
+	f = open_iproute2_db(filename, &path);
 	if (f == NULL)
 		goto out;
 
@@ -877,12 +908,15 @@ struct symbol_table *rt_symbol_table_init(const char *filename)
 			p++;
 		if (*p == '#' || *p == '\n' || *p == '\0')
 			continue;
-		if (sscanf(p, "0x%x %511s\n", &val, namebuf) != 2 &&
-		    sscanf(p, "0x%x %511s #", &val, namebuf) != 2 &&
-		    sscanf(p, "%u %511s\n", &val, namebuf) != 2 &&
-		    sscanf(p, "%u %511s #", &val, namebuf) != 2) {
+		if (sscanf(p, "0x%x %511s\n", &val, namebuf) == 2 ||
+		    sscanf(p, "0x%x %511s #", &val, namebuf) == 2) {
+			tbl->base = BASE_HEXADECIMAL;
+		} else if (sscanf(p, "%u %511s\n", &val, namebuf) == 2 ||
+			   sscanf(p, "%u %511s #", &val, namebuf) == 2) {
+			tbl->base = BASE_DECIMAL;
+		} else {
 			fprintf(stderr, "iproute database '%s' corrupted\n",
-				filename);
+				path ?: filename);
 			break;
 		}
 
@@ -899,6 +933,8 @@ struct symbol_table *rt_symbol_table_init(const char *filename)
 
 	fclose(f);
 out:
+	if (path)
+		free(path);
 	tbl->symbols[nelems] = SYMBOL_LIST_END;
 	return tbl;
 }
@@ -912,9 +948,36 @@ void rt_symbol_table_free(const struct symbol_table *tbl)
 	free_const(tbl);
 }
 
+void rt_symbol_table_describe(struct output_ctx *octx, const char *name,
+			      const struct symbol_table *tbl,
+			      const struct datatype *type)
+{
+	char *path = NULL;
+	FILE *f;
+
+	if (!tbl || !tbl->symbols[0].identifier)
+		return;
+
+	f = open_iproute2_db(name, &path);
+	if (f)
+		fclose(f);
+	if (!path && asprintf(&path, "%s%s",
+			      name[0] == '/' ? "" : "unknown location of ",
+			      name) < 0)
+		return;
+
+	nft_print(octx, "\npre-defined symbolic constants from %s ", path);
+	if (tbl->base == BASE_DECIMAL)
+		nft_print(octx, "(in decimal):\n");
+	else
+		nft_print(octx, "(in hexadecimal):\n");
+	symbol_table_print(tbl, type, type->byteorder, octx);
+	free(path);
+}
+
 void mark_table_init(struct nft_ctx *ctx)
 {
-	ctx->output.tbl.mark = rt_symbol_table_init("/etc/iproute2/rt_marks");
+	ctx->output.tbl.mark = rt_symbol_table_init("rt_marks");
 }
 
 void mark_table_exit(struct nft_ctx *ctx)
@@ -934,10 +997,17 @@ static struct error_record *mark_type_parse(struct parse_ctx *ctx,
 	return symbolic_constant_parse(ctx, sym, ctx->tbl->mark, res);
 }
 
+static void mark_type_describe(struct output_ctx *octx)
+{
+	rt_symbol_table_describe(octx, "rt_marks",
+				 octx->tbl.mark, &mark_type);
+}
+
 const struct datatype mark_type = {
 	.type		= TYPE_MARK,
 	.name		= "mark",
 	.desc		= "packet mark",
+	.describe	= mark_type_describe,
 	.size		= 4 * BITS_PER_BYTE,
 	.byteorder	= BYTEORDER_HOST_ENDIAN,
 	.basetype	= &integer_type,
