@@ -74,6 +74,33 @@ static int __fmtstring(3, 4) set_error(struct eval_ctx *ctx,
 	return -1;
 }
 
+static const char *stmt_name(const struct stmt *stmt)
+{
+	switch (stmt->ops->type) {
+	case STMT_NAT:
+		switch (stmt->nat.type) {
+		case NFT_NAT_SNAT:
+			return "snat";
+		case NFT_NAT_DNAT:
+			return "dnat";
+		case NFT_NAT_REDIR:
+			return "redirect";
+		case NFT_NAT_MASQ:
+			return "masquerade";
+		}
+		break;
+	default:
+		break;
+	}
+
+	return stmt->ops->name;
+}
+
+static int stmt_error_range(struct eval_ctx *ctx, const struct stmt *stmt, const struct expr *e)
+{
+	return expr_error(ctx->msgs, e, "%s: range argument not supported", stmt_name(stmt));
+}
+
 static void key_fix_dtype_byteorder(struct expr *key)
 {
 	const struct datatype *dtype = key->dtype;
@@ -106,6 +133,13 @@ static struct expr *implicit_set_declaration(struct eval_ctx *ctx,
 	set->init	= expr;
 	set->automerge	= set->flags & NFT_SET_INTERVAL;
 
+	if (set_evaluate(ctx, set) < 0) {
+		if (set->flags & NFT_SET_MAP)
+			set->init = NULL;
+		set_free(set);
+		return NULL;
+	}
+
 	if (ctx->table != NULL)
 		list_add_tail(&set->list, &ctx->table->sets);
 	else {
@@ -117,8 +151,6 @@ static struct expr *implicit_set_declaration(struct eval_ctx *ctx,
 		cmd->location = set->location;
 		list_add_tail(&cmd->list, &ctx->cmd->list);
 	}
-
-	set_evaluate(ctx, set);
 
 	return set_ref_expr_alloc(&expr->location, set);
 }
@@ -1593,6 +1625,11 @@ static int expr_evaluate_concat(struct eval_ctx *ctx, struct expr **expr)
 					  "cannot use %s in concatenation",
 					  expr_name(i));
 
+		if (!i->dtype)
+			return expr_error(ctx->msgs, i,
+					  "cannot use %s in concatenation, lacks datatype",
+					  expr_name(i));
+
 		flags &= i->flags;
 
 		if (!key && i->dtype->type == TYPE_INTEGER) {
@@ -1621,8 +1658,8 @@ static int expr_evaluate_concat(struct eval_ctx *ctx, struct expr **expr)
 		if (key && expressions) {
 			if (list_is_last(&key->list, expressions))
 				runaway = true;
-
-			key = list_next_entry(key, list);
+			else
+				key = list_next_entry(key, list);
 		}
 
 		ctx->inner_desc = NULL;
@@ -1658,16 +1695,22 @@ static int expr_evaluate_list(struct eval_ctx *ctx, struct expr **expr)
 
 	mpz_init_set_ui(val, 0);
 	list_for_each_entry_safe(i, next, &list->expressions, list) {
-		if (list_member_evaluate(ctx, &i) < 0)
+		if (list_member_evaluate(ctx, &i) < 0) {
+			mpz_clear(val);
 			return -1;
-		if (i->etype != EXPR_VALUE)
+		}
+		if (i->etype != EXPR_VALUE) {
+			mpz_clear(val);
 			return expr_error(ctx->msgs, i,
 					  "List member must be a constant "
 					  "value");
-		if (datatype_basetype(i->dtype)->type != TYPE_BITMASK)
+		}
+		if (datatype_basetype(i->dtype)->type != TYPE_BITMASK) {
+			mpz_clear(val);
 			return expr_error(ctx->msgs, i,
 					  "Basetype of type %s is not bitmask",
 					  i->dtype->desc);
+		}
 		mpz_ior(val, val, i->value);
 	}
 
@@ -2020,9 +2063,11 @@ static int expr_evaluate_map(struct eval_ctx *ctx, struct expr **expr)
 						  ctx->ectx.len, NULL);
 		}
 
-		if (!ectx.dtype)
+		if (!ectx.dtype) {
+			expr_free(key);
 			return expr_error(ctx->msgs, map,
 					  "Implicit map expression without known datatype");
+		}
 
 		if (ectx.dtype->type == TYPE_VERDICT) {
 			data = verdict_expr_alloc(&netlink_location, 0, NULL);
@@ -2038,6 +2083,8 @@ static int expr_evaluate_map(struct eval_ctx *ctx, struct expr **expr)
 		mappings = implicit_set_declaration(ctx, "__map%d",
 						    key, data,
 						    mappings);
+		if (!mappings)
+			return -1;
 
 		if (ectx.len && mappings->set->data->len != ectx.len)
 			BUG("%d vs %d\n", mappings->set->data->len, ectx.len);
@@ -2548,15 +2595,17 @@ static int expr_evaluate_relational(struct eval_ctx *ctx, struct expr **expr)
 		return expr_binary_error(ctx->msgs, right, left,
 					 "Cannot be used with right hand side constant value");
 
-	switch (rel->op) {
-	case OP_EQ:
-	case OP_IMPLICIT:
-	case OP_NEQ:
-		if (right->etype == EXPR_SET && right->size == 1)
-			optimize_singleton_set(rel, &right);
-		break;
-	default:
-		break;
+	if (left->etype != EXPR_CONCAT) {
+		switch (rel->op) {
+		case OP_EQ:
+		case OP_IMPLICIT:
+		case OP_NEQ:
+			if (right->etype == EXPR_SET && right->size == 1)
+				optimize_singleton_set(rel, &right);
+			break;
+		default:
+			break;
+		}
 	}
 
 	switch (rel->op) {
@@ -2607,6 +2656,9 @@ static int expr_evaluate_relational(struct eval_ctx *ctx, struct expr **expr)
 				implicit_set_declaration(ctx, "__set%d",
 							 expr_get(left), NULL,
 							 right);
+			if (!right)
+				return -1;
+
 			/* fall through */
 		case EXPR_SET_REF:
 			if (rel->left->etype == EXPR_CT &&
@@ -3080,13 +3132,8 @@ static int stmt_evaluate_exthdr(struct eval_ctx *ctx, struct stmt *stmt)
 	if (ret < 0)
 		return ret;
 
-	switch (stmt->exthdr.val->etype) {
-	case EXPR_RANGE:
-		return expr_error(ctx->msgs, stmt->exthdr.val,
-				   "cannot be a range");
-	default:
-		break;
-	}
+	if (stmt->exthdr.val->etype == EXPR_RANGE)
+		return stmt_error_range(ctx, stmt, stmt->exthdr.val);
 
 	return 0;
 }
@@ -3119,6 +3166,9 @@ static int stmt_evaluate_payload(struct eval_ctx *ctx, struct stmt *stmt)
 				 payload->byteorder) < 0)
 		return -1;
 
+	if (stmt->payload.val->etype == EXPR_RANGE)
+		return stmt_error_range(ctx, stmt, stmt->payload.val);
+
 	need_csum = stmt_evaluate_payload_need_csum(payload);
 
 	if (!payload_needs_adjustment(payload)) {
@@ -3137,6 +3187,11 @@ static int stmt_evaluate_payload(struct eval_ctx *ctx, struct stmt *stmt)
 				      &extra_len);
 	payload_byte_size = div_round_up(payload->len + extra_len,
 					 BITS_PER_BYTE);
+
+	if (payload_byte_size > sizeof(data))
+		return expr_error(ctx->msgs, stmt->payload.expr,
+				  "uneven load cannot span more than %u bytes, got %u",
+				  sizeof(data), payload_byte_size);
 
 	if (need_csum && payload_byte_size & 1) {
 		payload_byte_size++;
@@ -3251,6 +3306,8 @@ static int stmt_evaluate_meter(struct eval_ctx *ctx, struct stmt *stmt)
 
 	setref = implicit_set_declaration(ctx, stmt->meter.name,
 					  expr_get(key), NULL, set);
+	if (!setref)
+		return -1;
 
 	setref->set->desc.size = stmt->meter.size;
 	stmt->meter.set = setref;
@@ -3278,15 +3335,8 @@ static int stmt_evaluate_meta(struct eval_ctx *ctx, struct stmt *stmt)
 	if (ret < 0)
 		return ret;
 
-	switch (stmt->meta.expr->etype) {
-	case EXPR_RANGE:
-		ret = expr_error(ctx->msgs, stmt->meta.expr,
-				 "Meta expression cannot be a range");
-		break;
-	default:
-		break;
-
-	}
+	if (stmt->meta.expr->etype == EXPR_RANGE)
+		return stmt_error_range(ctx, stmt, stmt->meta.expr);
 
 	return ret;
 }
@@ -3308,6 +3358,9 @@ static int stmt_evaluate_ct(struct eval_ctx *ctx, struct stmt *stmt)
 	if (stmt->ct.key == NFT_CT_SECMARK && expr_is_constant(stmt->ct.expr))
 		return stmt_error(ctx, stmt,
 				  "ct secmark must not be set to constant value");
+
+	if (stmt->ct.expr->etype == EXPR_RANGE)
+		return stmt_error_range(ctx, stmt, stmt->ct.expr);
 
 	return 0;
 }
@@ -3826,28 +3879,6 @@ static int nat_evaluate_transport(struct eval_ctx *ctx, struct stmt *stmt,
 	return 0;
 }
 
-static const char *stmt_name(const struct stmt *stmt)
-{
-	switch (stmt->ops->type) {
-	case STMT_NAT:
-		switch (stmt->nat.type) {
-		case NFT_NAT_SNAT:
-			return "snat";
-		case NFT_NAT_DNAT:
-			return "dnat";
-		case NFT_NAT_REDIR:
-			return "redirect";
-		case NFT_NAT_MASQ:
-			return "masquerade";
-		}
-		break;
-	default:
-		break;
-	}
-
-	return stmt->ops->name;
-}
-
 static int stmt_evaluate_l3proto(struct eval_ctx *ctx,
 				 struct stmt *stmt, uint8_t family)
 {
@@ -4127,22 +4158,22 @@ static int stmt_evaluate_tproxy(struct eval_ctx *ctx, struct stmt *stmt)
 		return err;
 
 	if (stmt->tproxy.addr != NULL) {
-		if (stmt->tproxy.addr->etype == EXPR_RANGE)
-			return stmt_error(ctx, stmt, "Address ranges are not supported for tproxy.");
-
 		err = stmt_evaluate_addr(ctx, stmt, &stmt->tproxy.family,
 					 &stmt->tproxy.addr);
-
 		if (err < 0)
 			return err;
+
+		if (stmt->tproxy.addr->etype == EXPR_RANGE)
+			return stmt_error(ctx, stmt, "Address ranges are not supported for tproxy.");
 	}
 
 	if (stmt->tproxy.port != NULL) {
-		if (stmt->tproxy.port->etype == EXPR_RANGE)
-			return stmt_error(ctx, stmt, "Port ranges are not supported for tproxy.");
 		err = nat_evaluate_transport(ctx, stmt, &stmt->tproxy.port);
 		if (err < 0)
 			return err;
+
+		if (stmt->tproxy.port->etype == EXPR_RANGE)
+			return stmt_error(ctx, stmt, "Port ranges are not supported for tproxy.");
 	}
 
 	return 0;
@@ -4245,6 +4276,9 @@ static int stmt_evaluate_dup(struct eval_ctx *ctx, struct stmt *stmt)
 						&stmt->dup.dev);
 			if (err < 0)
 				return err;
+
+			if (stmt->dup.dev->etype == EXPR_RANGE)
+				return stmt_error_range(ctx, stmt, stmt->dup.dev);
 		}
 		break;
 	case NFPROTO_NETDEV:
@@ -4263,6 +4297,10 @@ static int stmt_evaluate_dup(struct eval_ctx *ctx, struct stmt *stmt)
 	default:
 		return stmt_error(ctx, stmt, "unsupported family");
 	}
+
+	if (stmt->dup.to->etype == EXPR_RANGE)
+		return stmt_error_range(ctx, stmt, stmt->dup.to);
+
 	return 0;
 }
 
@@ -4284,6 +4322,9 @@ static int stmt_evaluate_fwd(struct eval_ctx *ctx, struct stmt *stmt)
 		if (err < 0)
 			return err;
 
+		if (stmt->fwd.dev->etype == EXPR_RANGE)
+			return stmt_error_range(ctx, stmt, stmt->fwd.dev);
+
 		if (stmt->fwd.addr != NULL) {
 			switch (stmt->fwd.family) {
 			case NFPROTO_IPV4:
@@ -4302,6 +4343,9 @@ static int stmt_evaluate_fwd(struct eval_ctx *ctx, struct stmt *stmt)
 						&stmt->fwd.addr);
 			if (err < 0)
 				return err;
+
+			if (stmt->fwd.addr->etype == EXPR_RANGE)
+				return stmt_error_range(ctx, stmt, stmt->fwd.addr);
 		}
 		break;
 	default:
@@ -4530,6 +4574,8 @@ static int stmt_evaluate_objref_map(struct eval_ctx *ctx, struct stmt *stmt)
 
 		mappings = implicit_set_declaration(ctx, "__objmap%d",
 						    key, NULL, mappings);
+		if (!mappings)
+			return -1;
 		mappings->set->objtype  = stmt->objref.type;
 
 		map->mappings = mappings;
@@ -4861,6 +4907,21 @@ static int set_evaluate(struct eval_ctx *ctx, struct set *set)
 		       sizeof(set->desc.field_len));
 		set->desc.field_count = set->key->field_count;
 		set->flags |= NFT_SET_CONCAT;
+	}
+
+	if (set_is_anonymous(set->flags) && set->key->etype == EXPR_CONCAT) {
+		struct expr *i;
+
+		list_for_each_entry(i, &set->init->expressions, list) {
+			if ((i->etype == EXPR_SET_ELEM &&
+			     i->key->etype != EXPR_CONCAT &&
+			     i->key->etype != EXPR_SET_ELEM_CATCHALL) ||
+			    (i->etype == EXPR_MAPPING &&
+			     i->left->etype == EXPR_SET_ELEM &&
+			     i->left->key->etype != EXPR_CONCAT &&
+			     i->left->key->etype != EXPR_SET_ELEM_CATCHALL))
+				return expr_error(ctx->msgs, i, "expression is not a concatenation");
+		}
 	}
 
 	if (set_is_datamap(set->flags)) {
