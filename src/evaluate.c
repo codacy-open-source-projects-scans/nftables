@@ -116,7 +116,8 @@ static struct expr *implicit_set_declaration(struct eval_ctx *ctx,
 					     const char *name,
 					     struct expr *key,
 					     struct expr *data,
-					     struct expr *expr)
+					     struct expr *expr,
+					     uint32_t flags)
 {
 	struct cmd *cmd;
 	struct set *set;
@@ -126,12 +127,14 @@ static struct expr *implicit_set_declaration(struct eval_ctx *ctx,
 		key_fix_dtype_byteorder(key);
 
 	set = set_alloc(&expr->location);
-	set->flags	= NFT_SET_ANONYMOUS | expr->set_flags;
+	set->flags	= expr->set_flags | flags;
 	set->handle.set.name = xstrdup(name);
 	set->key	= key;
 	set->data	= data;
 	set->init	= expr;
 	set->automerge	= set->flags & NFT_SET_INTERVAL;
+
+	handle_merge(&set->handle, &ctx->cmd->handle);
 
 	if (set_evaluate(ctx, set) < 0) {
 		if (set->flags & NFT_SET_MAP)
@@ -143,7 +146,6 @@ static struct expr *implicit_set_declaration(struct eval_ctx *ctx,
 	if (ctx->table != NULL)
 		list_add_tail(&set->list, &ctx->table->sets);
 	else {
-		handle_merge(&set->handle, &ctx->cmd->handle);
 		memset(&h, 0, sizeof(h));
 		handle_merge(&h, &set->handle);
 		h.set.location = expr->location;
@@ -254,7 +256,7 @@ static int table_not_found(struct eval_ctx *ctx)
 				 "%s", strerror(ENOENT));
 
 	return cmd_error(ctx, &ctx->cmd->handle.table.location,
-			 "%s; did you mean table ‘%s’ in family %s?",
+			 "%s; did you mean table '%s' in family %s?",
 			 strerror(ENOENT), table->handle.table.name,
 			 family2str(table->handle.family));
 }
@@ -270,7 +272,7 @@ static int chain_not_found(struct eval_ctx *ctx)
 				 "%s", strerror(ENOENT));
 
 	return cmd_error(ctx, &ctx->cmd->handle.chain.location,
-			 "%s; did you mean chain ‘%s’ in table %s ‘%s’?",
+			 "%s; did you mean chain '%s' in table %s '%s'?",
 			 strerror(ENOENT), chain->handle.chain.name,
 			 family2str(chain->handle.family),
 			 table->handle.table.name);
@@ -287,7 +289,7 @@ static int set_not_found(struct eval_ctx *ctx, const struct location *loc,
 		return cmd_error(ctx, loc, "%s", strerror(ENOENT));
 
 	return cmd_error(ctx, loc,
-			 "%s; did you mean %s ‘%s’ in table %s ‘%s’?",
+			 "%s; did you mean %s '%s' in table %s '%s'?",
 			 strerror(ENOENT),
 			 set_is_map(set->flags) ? "map" : "set",
 			 set->handle.set.name,
@@ -306,7 +308,7 @@ static int flowtable_not_found(struct eval_ctx *ctx, const struct location *loc,
 		return cmd_error(ctx, loc, "%s", strerror(ENOENT));
 
 	return cmd_error(ctx, loc,
-			"%s; did you mean flowtable ‘%s’ in table %s ‘%s’?",
+			"%s; did you mean flowtable '%s' in table %s '%s'?",
 			strerror(ENOENT), ft->handle.flowtable.name,
 			family2str(ft->handle.family),
 			table->handle.table.name);
@@ -2088,7 +2090,8 @@ static int expr_evaluate_map(struct eval_ctx *ctx, struct expr **expr)
 
 		mappings = implicit_set_declaration(ctx, "__map%d",
 						    key, data,
-						    mappings);
+						    mappings,
+						    NFT_SET_ANONYMOUS);
 		if (!mappings)
 			return -1;
 
@@ -2661,7 +2664,8 @@ static int expr_evaluate_relational(struct eval_ctx *ctx, struct expr **expr)
 			right = rel->right =
 				implicit_set_declaration(ctx, "__set%d",
 							 expr_get(left), NULL,
-							 right);
+							 right,
+							 NFT_SET_ANONYMOUS);
 			if (!right)
 				return -1;
 
@@ -3286,7 +3290,7 @@ static int stmt_evaluate_meter(struct eval_ctx *ctx, struct stmt *stmt)
 	existing_set = set_cache_find(table, stmt->meter.name);
 	if (existing_set)
 		return cmd_error(ctx, &stmt->location,
-				 "%s; meter ‘%s’ overlaps an existing %s ‘%s’ in family %s",
+				 "%s; meter '%s' overlaps an existing %s '%s' in family %s",
 				 strerror(EEXIST),
 				 stmt->meter.name,
 				 set_is_map(existing_set->flags) ? "map" : "set",
@@ -3311,7 +3315,7 @@ static int stmt_evaluate_meter(struct eval_ctx *ctx, struct stmt *stmt)
 		set->set_flags |= NFT_SET_TIMEOUT;
 
 	setref = implicit_set_declaration(ctx, stmt->meter.name,
-					  expr_get(key), NULL, set);
+					  expr_get(key), NULL, set, 0);
 	if (!setref)
 		return -1;
 
@@ -4579,7 +4583,8 @@ static int stmt_evaluate_objref_map(struct eval_ctx *ctx, struct stmt *stmt)
 					  ctx->ectx.len, NULL);
 
 		mappings = implicit_set_declaration(ctx, "__objmap%d",
-						    key, NULL, mappings);
+						    key, NULL, mappings,
+						    NFT_SET_ANONYMOUS);
 		if (!mappings)
 			return -1;
 		mappings->set->objtype  = stmt->objref.type;
@@ -5647,7 +5652,7 @@ static int obj_not_found(struct eval_ctx *ctx, const struct location *loc,
 		return cmd_error(ctx, loc, "%s", strerror(ENOENT));
 
 	return cmd_error(ctx, loc,
-			 "%s; did you mean obj ‘%s’ in table %s ‘%s’?",
+			 "%s; did you mean obj '%s' in table %s '%s'?",
 			 strerror(ENOENT), obj->handle.obj.name,
 				 family2str(obj->handle.family),
 				 table->handle.table.name);
@@ -5707,7 +5712,7 @@ static int cmd_evaluate_list(struct eval_ctx *ctx, struct cmd *cmd)
 					     ctx->cmd->handle.set.name);
 		if ((cmd->obj == CMD_OBJ_SET && !set_is_literal(set->flags)) ||
 		    (cmd->obj == CMD_OBJ_MAP && !map_is_literal(set->flags)) ||
-		    (cmd->obj == CMD_OBJ_METER && !set_is_meter(set->flags)))
+		    (cmd->obj == CMD_OBJ_METER && !set_is_meter_compat(set->flags)))
 			return cmd_error(ctx, &ctx->cmd->handle.set.location,
 					 "%s", strerror(ENOENT));
 
@@ -5886,7 +5891,7 @@ static int cmd_evaluate_flush(struct eval_ctx *ctx, struct cmd *cmd)
 		if (set == NULL)
 			return set_not_found(ctx, &ctx->cmd->handle.set.location,
 					     ctx->cmd->handle.set.name);
-		else if (!set_is_meter(set->flags))
+		else if (!set_is_meter_compat(set->flags))
 			return cmd_error(ctx, &ctx->cmd->handle.set.location,
 					 "%s", strerror(ENOENT));
 
