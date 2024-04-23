@@ -202,11 +202,18 @@ Rename a chain. The new name is expected in a dedicated property named
 
 === TABLE
 [verse]
+____
 *{ "table": {
 	"family":* 'STRING'*,
 	"name":* 'STRING'*,
-	"handle":* 'NUMBER'
+	"handle":* 'NUMBER'*,
+	"flags":* 'TABLE_FLAGS'
 *}}*
+
+'TABLE_FLAGS' := 'TABLE_FLAG' | *[* 'TABLE_FLAG_LIST' *]*
+'TABLE_FLAG_LIST' := 'TABLE_FLAG' [*,* 'TABLE_FLAG_LIST' ]
+'TABLE_FLAG' := *"dormant"* | *"owner"* | *"persist"*
+____
 
 This object describes a table.
 
@@ -217,6 +224,8 @@ This object describes a table.
 *handle*::
 	The table's handle. In input, it is used only in *delete* command as
 	alternative to *name*.
+*flags*::
+	The table's flags.
 
 === CHAIN
 [verse]
@@ -1343,15 +1352,17 @@ Perform kernel Forwarding Information Base lookups.
 
 === BINARY OPERATION
 [verse]
-*{ "|": [* 'EXPRESSION'*,* 'EXPRESSION' *] }*
-*{ "^": [* 'EXPRESSION'*,* 'EXPRESSION' *] }*
-*{ "&": [* 'EXPRESSION'*,* 'EXPRESSION' *] }*
-*{ "+<<+": [* 'EXPRESSION'*,* 'EXPRESSION' *] }*
-*{ ">>": [* 'EXPRESSION'*,* 'EXPRESSION' *] }*
+*{ "|": [* 'EXPRESSION'*,* 'EXPRESSIONS' *] }*
+*{ "^": [* 'EXPRESSION'*,* 'EXPRESSIONS' *] }*
+*{ "&": [* 'EXPRESSION'*,* 'EXPRESSIONS' *] }*
+*{ "+<<+": [* 'EXPRESSION'*,* 'EXPRESSIONS' *] }*
+*{ ">>": [* 'EXPRESSION'*,* 'EXPRESSIONS' *] }*
+'EXPRESSIONS' := 'EXPRESSION' | 'EXPRESSION'*,* 'EXPRESSIONS'
 
-All binary operations expect an array of exactly two expressions, of which the
+All binary operations expect an array of at least two expressions, of which the
 first element denotes the left hand side and the second one the right hand
-side.
+side. Extra elements are accepted in the given array and appended to the term
+accordingly.
 
 === VERDICT
 [verse]
