@@ -6,6 +6,13 @@
         "release_name": "RELEASE_NAME",
         "json_schema_version": 1
       }
+    },
+    {
+      "table": {
+        "family": "ip",
+        "name": "x",
+        "handle": 0
+      }
     }
   ]
 }

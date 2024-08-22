@@ -30,10 +30,7 @@ static unsigned int evaluate_cache_add(struct cmd *cmd, unsigned int flags)
 			break;
 
 		flags |= NFT_CACHE_TABLE |
-			 NFT_CACHE_CHAIN |
-			 NFT_CACHE_SET |
-			 NFT_CACHE_OBJECT |
-			 NFT_CACHE_FLOWTABLE;
+			 NFT_CACHE_SET;
 		list_for_each_entry(set, &cmd->table->sets, list) {
 			if (set->automerge)
 				 flags |= NFT_CACHE_SETELEM_MAYBE;
@@ -54,21 +51,16 @@ static unsigned int evaluate_cache_add(struct cmd *cmd, unsigned int flags)
 		break;
 	case CMD_OBJ_ELEMENTS:
 		flags |= NFT_CACHE_TABLE |
-			 NFT_CACHE_CHAIN |
 			 NFT_CACHE_SET |
-			 NFT_CACHE_OBJECT |
 			 NFT_CACHE_SETELEM_MAYBE;
 		break;
 	case CMD_OBJ_RULE:
 		flags |= NFT_CACHE_TABLE |
-			 NFT_CACHE_CHAIN |
-			 NFT_CACHE_SET |
-			 NFT_CACHE_OBJECT |
-			 NFT_CACHE_FLOWTABLE;
+			 NFT_CACHE_SET;
 
 		if (cmd->handle.index.id ||
 		    cmd->handle.position.id)
-			flags |= NFT_CACHE_RULE | NFT_CACHE_UPDATE;
+			flags |= NFT_CACHE_FULL | NFT_CACHE_UPDATE;
 		break;
 	default:
 		break;
@@ -81,7 +73,8 @@ static unsigned int evaluate_cache_del(struct cmd *cmd, unsigned int flags)
 {
 	switch (cmd->obj) {
 	case CMD_OBJ_ELEMENTS:
-		flags |= NFT_CACHE_SETELEM_MAYBE;
+		flags |= NFT_CACHE_SET |
+			 NFT_CACHE_SETELEM_MAYBE;
 		break;
 	default:
 		break;
@@ -434,11 +427,7 @@ int nft_cache_evaluate(struct nft_ctx *nft, struct list_head *cmds,
 			break;
 		case CMD_DELETE:
 		case CMD_DESTROY:
-			flags |= NFT_CACHE_TABLE |
-				 NFT_CACHE_CHAIN |
-				 NFT_CACHE_SET |
-				 NFT_CACHE_FLOWTABLE |
-				 NFT_CACHE_OBJECT;
+			flags |= NFT_CACHE_TABLE;
 
 			flags = evaluate_cache_del(cmd, flags);
 			break;
