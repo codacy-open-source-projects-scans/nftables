@@ -190,6 +190,22 @@ static unsigned int evaluate_cache_rename(struct cmd *cmd, unsigned int flags)
 	return flags;
 }
 
+static void obj_filter_setup(const struct cmd *cmd, unsigned int *flags,
+			     struct nft_cache_filter *filter, int type)
+{
+	assert(filter);
+
+	if (cmd->handle.family)
+		filter->list.family = cmd->handle.family;
+	if (cmd->handle.table.name)
+		filter->list.table = cmd->handle.table.name;
+	if (cmd->handle.obj.name)
+		filter->list.obj = cmd->handle.obj.name;
+
+	filter->list.obj_type = type;
+	*flags |= NFT_CACHE_TABLE | NFT_CACHE_OBJECT;
+}
+
 static unsigned int evaluate_cache_list(struct nft_ctx *nft, struct cmd *cmd,
 					unsigned int flags,
 					struct nft_cache_filter *filter)
@@ -251,6 +267,37 @@ static unsigned int evaluate_cache_list(struct nft_ctx *nft, struct cmd *cmd,
 	case CMD_OBJ_FLOWTABLES:
 		flags |= NFT_CACHE_TABLE | NFT_CACHE_FLOWTABLE;
 		break;
+	case CMD_OBJ_COUNTER:
+	case CMD_OBJ_COUNTERS:
+		obj_filter_setup(cmd, &flags, filter, NFT_OBJECT_COUNTER);
+		break;
+	case CMD_OBJ_QUOTA:
+	case CMD_OBJ_QUOTAS:
+		obj_filter_setup(cmd, &flags, filter, NFT_OBJECT_QUOTA);
+		break;
+	case CMD_OBJ_CT_HELPER:
+	case CMD_OBJ_CT_HELPERS:
+		obj_filter_setup(cmd, &flags, filter, NFT_OBJECT_CT_HELPER);
+		break;
+	case CMD_OBJ_LIMIT:
+	case CMD_OBJ_LIMITS:
+		obj_filter_setup(cmd, &flags, filter, NFT_OBJECT_LIMIT);
+		break;
+	case CMD_OBJ_CT_TIMEOUT:
+	case CMD_OBJ_CT_TIMEOUTS:
+		obj_filter_setup(cmd, &flags, filter, NFT_OBJECT_CT_TIMEOUT);
+		break;
+	case CMD_OBJ_SECMARK:
+	case CMD_OBJ_SECMARKS:
+		obj_filter_setup(cmd, &flags, filter, NFT_OBJECT_SECMARK);
+		break;
+	case CMD_OBJ_CT_EXPECT:
+		obj_filter_setup(cmd, &flags, filter, NFT_OBJECT_CT_EXPECT);
+		break;
+	case CMD_OBJ_SYNPROXY:
+	case CMD_OBJ_SYNPROXYS:
+		obj_filter_setup(cmd, &flags, filter, NFT_OBJECT_SYNPROXY);
+		break;
 	case CMD_OBJ_RULESET:
 	default:
 		flags |= NFT_CACHE_FULL;
@@ -267,27 +314,49 @@ static unsigned int evaluate_cache_list(struct nft_ctx *nft, struct cmd *cmd,
 static unsigned int evaluate_cache_reset(struct cmd *cmd, unsigned int flags,
 					 struct nft_cache_filter *filter)
 {
+	assert(filter);
+
 	switch (cmd->obj) {
+	case CMD_OBJ_TABLE:
+	case CMD_OBJ_CHAIN:
 	case CMD_OBJ_RULES:
 	case CMD_OBJ_RULE:
-		if (filter) {
-			if (cmd->handle.table.name) {
-				filter->list.family = cmd->handle.family;
-				filter->list.table = cmd->handle.table.name;
-			}
-			if (cmd->handle.chain.name)
-				filter->list.chain = cmd->handle.chain.name;
+		if (cmd->handle.table.name) {
+			filter->list.family = cmd->handle.family;
+			filter->list.table = cmd->handle.table.name;
 		}
-		flags |= NFT_CACHE_SET | NFT_CACHE_FLOWTABLE |
-			 NFT_CACHE_OBJECT | NFT_CACHE_CHAIN;
+		if (cmd->handle.chain.name)
+			filter->list.chain = cmd->handle.chain.name;
+		if (cmd->handle.family)
+			filter->list.family = cmd->handle.family;
+		if (cmd->handle.handle.id)
+			filter->list.rule_handle = cmd->handle.handle.id;
+
+		filter->reset.rule = true;
+		flags |= NFT_CACHE_FULL;
 		break;
-	case CMD_OBJ_ELEMENTS:
+	case CMD_OBJ_COUNTER:
+	case CMD_OBJ_COUNTERS:
+		obj_filter_setup(cmd, &flags, filter, NFT_OBJECT_COUNTER);
+		filter->reset.obj = true;
+		break;
+	case CMD_OBJ_QUOTA:
+	case CMD_OBJ_QUOTAS:
+		obj_filter_setup(cmd, &flags, filter, NFT_OBJECT_QUOTA);
+		filter->reset.obj = true;
+		break;
 	case CMD_OBJ_SET:
 	case CMD_OBJ_MAP:
-		flags |= NFT_CACHE_SET;
+		if (cmd->handle.table.name && cmd->handle.set.name) {
+			filter->list.family = cmd->handle.family;
+			filter->list.table = cmd->handle.table.name;
+			filter->list.set = cmd->handle.set.name;
+		}
+		flags |= NFT_CACHE_SETELEM;
+		filter->reset.elem = true;
 		break;
 	default:
-		flags |= NFT_CACHE_TABLE;
+		flags |= NFT_CACHE_FULL;
 		break;
 	}
 	flags |= NFT_CACHE_REFRESH;
@@ -400,19 +469,25 @@ err_name_too_long:
 	return -1;
 }
 
+static void reset_filter(struct nft_cache_filter *filter)
+{
+	memset(&filter->list, 0, sizeof(filter->list));
+	memset(&filter->reset, 0, sizeof(filter->reset));
+}
+
 int nft_cache_evaluate(struct nft_ctx *nft, struct list_head *cmds,
 		       struct list_head *msgs, struct nft_cache_filter *filter,
 		       unsigned int *pflags)
 {
-	unsigned int flags = NFT_CACHE_EMPTY;
+	unsigned int flags, batch_flags = NFT_CACHE_EMPTY;
 	struct cmd *cmd;
 
 	list_for_each_entry(cmd, cmds, list) {
 		if (nft_handle_validate(cmd, msgs) < 0)
 			return -1;
 
-		if (filter->list.table && cmd->op != CMD_LIST)
-			memset(&filter->list, 0, sizeof(filter->list));
+		flags = NFT_CACHE_EMPTY;
+		reset_filter(filter);
 
 		switch (cmd->op) {
 		case CMD_ADD:
@@ -435,13 +510,13 @@ int nft_cache_evaluate(struct nft_ctx *nft, struct list_head *cmds,
 			flags = evaluate_cache_get(cmd, flags);
 			break;
 		case CMD_RESET:
-			flags |= evaluate_cache_reset(cmd, flags, filter);
+			flags = evaluate_cache_reset(cmd, flags, filter);
 			break;
 		case CMD_LIST:
-			flags |= evaluate_cache_list(nft, cmd, flags, filter);
+			flags = evaluate_cache_list(nft, cmd, flags, filter);
 			break;
 		case CMD_MONITOR:
-			flags |= NFT_CACHE_FULL;
+			flags = NFT_CACHE_FULL;
 			break;
 		case CMD_FLUSH:
 			flags = evaluate_cache_flush(cmd, flags, filter);
@@ -456,8 +531,9 @@ int nft_cache_evaluate(struct nft_ctx *nft, struct list_head *cmds,
 		default:
 			break;
 		}
+		batch_flags |= flags;
 	}
-	*pflags = flags;
+	*pflags = batch_flags;
 
 	return 0;
 }
@@ -636,23 +712,32 @@ static int list_rule_cb(struct nftnl_rule *nlr, void *data)
 	return 0;
 }
 
-int rule_cache_dump(struct netlink_ctx *ctx, const struct handle *h,
-		    const struct nft_cache_filter *filter,
-		    bool dump, bool reset)
+static int rule_cache_dump(struct netlink_ctx *ctx, const struct handle *h,
+			   const struct nft_cache_filter *filter)
 {
 	struct nftnl_rule_list *rule_cache;
-	const char *table = NULL;
+	const char *table = h->table.name;
 	const char *chain = NULL;
 	uint64_t rule_handle = 0;
+	int family = h->family;
+	bool dump = true;
 
 	if (filter) {
-		table = filter->list.table;
-		chain = filter->list.chain;
-		rule_handle = filter->list.rule_handle;
+		if (filter->list.table)
+			table = filter->list.table;
+		if (filter->list.chain)
+			chain = filter->list.chain;
+		if (filter->list.rule_handle) {
+			rule_handle = filter->list.rule_handle;
+			dump = false;
+		}
+		if (filter->list.family)
+			family = filter->list.family;
 	}
 
-	rule_cache = mnl_nft_rule_dump(ctx, h->family,
-				       table, chain, rule_handle, dump, reset);
+	rule_cache = mnl_nft_rule_dump(ctx, family,
+				       table, chain, rule_handle, dump,
+				       filter->reset.rule);
 	if (rule_cache == NULL) {
 		if (errno == EINTR)
 			return -1;
@@ -776,9 +861,18 @@ struct obj_cache_dump_ctx {
 static int obj_cache_cb(struct nftnl_obj *nlo, void *arg)
 {
 	struct obj_cache_dump_ctx *ctx = arg;
+	const char *obj_table;
 	const char *obj_name;
+	uint32_t obj_family;
 	struct obj *obj;
 	uint32_t hash;
+
+	obj_table = nftnl_obj_get_str(nlo, NFTNL_OBJ_TABLE);
+	obj_family = nftnl_obj_get_u32(nlo, NFTNL_OBJ_FAMILY);
+
+	if (obj_family != ctx->table->handle.family ||
+	    strcmp(obj_table, ctx->table->handle.table.name))
+		return 0;
 
 	obj = netlink_delinearize_obj(ctx->nlctx, nlo);
 	if (!obj)
@@ -787,6 +881,9 @@ static int obj_cache_cb(struct nftnl_obj *nlo, void *arg)
 	obj_name = nftnl_obj_get_str(nlo, NFTNL_OBJ_NAME);
 	hash = djb_hash(obj_name) % NFT_CACHE_HSIZE;
 	cache_add(&obj->cache, &ctx->table->obj_cache, hash);
+
+	nftnl_obj_list_del(nlo);
+	nftnl_obj_free(nlo);
 
 	return 0;
 }
@@ -804,13 +901,28 @@ static int obj_cache_init(struct netlink_ctx *ctx, struct table *table,
 }
 
 static struct nftnl_obj_list *obj_cache_dump(struct netlink_ctx *ctx,
-					     const struct table *table)
+					     const struct nft_cache_filter *filter)
 {
 	struct nftnl_obj_list *obj_list;
+	int type = NFT_OBJECT_UNSPEC;
+	int family = NFPROTO_UNSPEC;
+	const char *table = NULL;
+	const char *obj = NULL;
+	bool dump = true;
 
-	obj_list = mnl_nft_obj_dump(ctx, table->handle.family,
-				    table->handle.table.name, NULL,
-				    0, true, false);
+	if (filter) {
+		family = filter->list.family;
+		if (filter->list.table)
+			table = filter->list.table;
+		if (filter->list.obj) {
+			obj = filter->list.obj;
+			dump = false;
+		}
+		if (filter->list.obj_type)
+			type = filter->list.obj_type;
+	}
+	obj_list = mnl_nft_obj_dump(ctx, family, table, obj, type, dump,
+				    filter->reset.obj);
 	if (!obj_list) {
                 if (errno == EINTR)
 			return NULL;
@@ -984,7 +1096,7 @@ static int rule_init_cache(struct netlink_ctx *ctx, struct table *table,
 	struct chain *chain;
 	int ret;
 
-	ret = rule_cache_dump(ctx, &table->handle, filter, true, false);
+	ret = rule_cache_dump(ctx, &table->handle, filter);
 
 	list_for_each_entry_safe(rule, nrule, &ctx->list, list) {
 		chain = chain_cache_find(table, rule->handle.chain.name);
@@ -1033,7 +1145,7 @@ static int cache_init_objects(struct netlink_ctx *ctx, unsigned int flags,
 	struct nftnl_flowtable_list *ft_list = NULL;
 	struct nftnl_chain_list *chain_list = NULL;
 	struct nftnl_set_list *set_list = NULL;
-	struct nftnl_obj_list *obj_list;
+	struct nftnl_obj_list *obj_list = NULL;
 	struct table *table;
 	struct set *set;
 	int ret = 0;
@@ -1046,6 +1158,13 @@ static int cache_init_objects(struct netlink_ctx *ctx, unsigned int flags,
 	if (flags & NFT_CACHE_SET_BIT) {
 		set_list = set_cache_dump(ctx, filter, &ret);
 		if (!set_list) {
+			ret = -1;
+			goto cache_fails;
+		}
+	}
+	if (flags & NFT_CACHE_OBJECT_BIT) {
+		obj_list = obj_cache_dump(ctx, filter);
+		if (!obj_list) {
 			ret = -1;
 			goto cache_fails;
 		}
@@ -1073,7 +1192,7 @@ static int cache_init_objects(struct netlink_ctx *ctx, unsigned int flags,
 					continue;
 
 				ret = netlink_list_setelems(ctx, &set->handle,
-							    set, false);
+							    set, filter->reset.elem);
 				if (ret < 0)
 					goto cache_fails;
 			}
@@ -1086,7 +1205,7 @@ static int cache_init_objects(struct netlink_ctx *ctx, unsigned int flags,
 					continue;
 
 				ret = netlink_list_setelems(ctx, &set->handle,
-							    set, false);
+							    set, filter->reset.elem);
 				if (ret < 0)
 					goto cache_fails;
 			}
@@ -1102,15 +1221,7 @@ static int cache_init_objects(struct netlink_ctx *ctx, unsigned int flags,
 				goto cache_fails;
 		}
 		if (flags & NFT_CACHE_OBJECT_BIT) {
-			obj_list = obj_cache_dump(ctx, table);
-			if (!obj_list) {
-				ret = -1;
-				goto cache_fails;
-			}
 			ret = obj_cache_init(ctx, table, obj_list);
-
-			nftnl_obj_list_free(obj_list);
-
 			if (ret < 0)
 				goto cache_fails;
 		}
@@ -1131,6 +1242,8 @@ static int cache_init_objects(struct netlink_ctx *ctx, unsigned int flags,
 cache_fails:
 	if (set_list)
 		nftnl_set_list_free(set_list);
+	if (obj_list)
+		nftnl_obj_list_free(obj_list);
 	if (ft_list)
 		nftnl_flowtable_list_free(ft_list);
 
