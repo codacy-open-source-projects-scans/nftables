@@ -115,7 +115,7 @@ struct symbol {
 	struct list_head	list;
 	const char		*identifier;
 	struct expr		*expr;
-	int			refcnt;
+	unsigned int		refcnt;
 };
 
 extern void symbol_bind(struct scope *scope, const char *identifier,
@@ -170,6 +170,7 @@ struct table {
 	uint32_t		owner;
 	const char		*comment;
 	bool			has_xt_stmts;
+	bool			is_from_future;
 };
 
 extern struct table *table_alloc(void);
@@ -321,6 +322,7 @@ void rule_stmt_insert_at(struct rule *rule, struct stmt *nstmt,
  * @refcnt:	reference count
  * @flags:	bitmask of set flags
  * @gc_int:	garbage collection interval
+ * @count:	count of kernel-allocated elements
  * @timeout:	default timeout value
  * @key:	key expression (data type, length))
  * @data:	mapping data expression
@@ -332,6 +334,7 @@ void rule_stmt_insert_at(struct rule *rule, struct stmt *nstmt,
  * @automerge:	merge adjacents and overlapping elements, if possible
  * @comment:	comment
  * @errors:	expr evaluation errors seen
+ * @elem_has_comment: element with comment seen (for printing)
  * @desc.size:		count of set elements
  * @desc.field_len:	length of single concatenated fields, bytes
  * @desc.field_count:	count of concatenated fields
@@ -344,6 +347,7 @@ struct set {
 	unsigned int		refcnt;
 	uint32_t		flags;
 	uint32_t		gc_int;
+	uint32_t		count;
 	uint64_t		timeout;
 	struct expr		*key;
 	struct expr		*data;
@@ -357,6 +361,7 @@ struct set {
 	bool			automerge;
 	bool			key_typeof_valid;
 	bool			errors;
+	bool			elem_has_comment;
 	const char		*comment;
 	struct {
 		uint32_t	size;
@@ -423,7 +428,7 @@ static inline bool set_is_interval(uint32_t set_flags)
 	return set_flags & NFT_SET_INTERVAL;
 }
 
-static inline bool set_is_non_concat_range(struct set *s)
+static inline bool set_is_non_concat_range(const struct set *s)
 {
 	return (s->flags & NFT_SET_INTERVAL) && s->desc.field_count <= 1;
 }
@@ -488,6 +493,52 @@ struct secmark {
 	char		ctx[NFT_SECMARK_CTX_MAXLEN];
 };
 
+enum tunnel_type {
+	TUNNEL_UNSPEC = 0,
+	TUNNEL_ERSPAN,
+	TUNNEL_VXLAN,
+	TUNNEL_GENEVE,
+};
+
+struct tunnel_geneve {
+	struct list_head	list;
+	uint16_t		geneve_class;
+	uint8_t			type;
+	uint8_t			data[NFTNL_TUNNEL_GENEVE_DATA_MAXLEN];
+	uint32_t		data_len;
+};
+
+struct tunnel {
+	uint32_t	id;
+	struct expr	*src;
+	struct expr	*dst;
+	uint16_t	sport;
+	uint16_t	dport;
+	uint8_t		tos;
+	uint8_t		ttl;
+	enum tunnel_type type;
+	union {
+		struct {
+			uint32_t	version;
+			struct {
+				uint32_t	index;
+			} v1;
+			struct {
+				uint8_t		direction;
+				uint8_t		hwid;
+			} v2;
+		} erspan;
+		struct {
+			uint32_t	gbp;
+		} vxlan;
+		struct list_head	geneve_opts;
+	};
+};
+
+int tunnel_geneve_data_str2array(const char *hexstr,
+				 uint8_t *out_data,
+				 uint32_t *out_len);
+
 /**
  * struct obj - nftables stateful object statement
  *
@@ -514,6 +565,7 @@ struct obj {
 		struct secmark		secmark;
 		struct ct_expect	ct_expect;
 		struct synproxy		synproxy;
+		struct tunnel		tunnel;
 	};
 };
 
@@ -551,6 +603,7 @@ extern struct flowtable *flowtable_lookup_fuzzy(const char *ft_name,
 						const struct table **table);
 
 void flowtable_print(const struct flowtable *n, struct output_ctx *octx);
+void flowtable_print_plain(const struct flowtable *ft, struct output_ctx *octx);
 
 /**
  * enum cmd_ops - command operations
@@ -621,6 +674,9 @@ enum cmd_ops {
  * @CMD_OBJ_SECMARKS:	multiple secmarks
  * @CMD_OBJ_SYNPROXY:	synproxy
  * @CMD_OBJ_SYNPROXYS:	multiple synproxys
+ * @CMD_OBJ_TUNNEL:	tunnel
+ * @CMD_OBJ_TUNNELS:	multiple tunnels
+ * @CMD_OBJ_HOOKS:	hooks, used only for dumping
  */
 enum cmd_obj {
 	CMD_OBJ_INVALID,
@@ -659,6 +715,8 @@ enum cmd_obj {
 	CMD_OBJ_CT_EXPECTATIONS,
 	CMD_OBJ_SYNPROXY,
 	CMD_OBJ_SYNPROXYS,
+	CMD_OBJ_TUNNEL,
+	CMD_OBJ_TUNNELS,
 	CMD_OBJ_HOOKS,
 };
 
@@ -695,7 +753,8 @@ void monitor_free(struct monitor *m);
 #define NFT_NLATTR_LOC_MAX 32
 
 struct nlerr_loc {
-	uint16_t		offset;
+	uint32_t		seqnum;
+	uint32_t		offset;
 	const struct location	*location;
 };
 
@@ -717,8 +776,8 @@ struct cmd {
 	enum cmd_ops		op;
 	enum cmd_obj		obj;
 	struct handle		handle;
-	uint32_t		seqnum;
-	struct list_head	collapse_list;
+	uint32_t		seqnum_from;
+	uint32_t		seqnum_to;
 	union {
 		void		*data;
 		struct expr	*expr;
@@ -752,6 +811,11 @@ extern void cmd_free(struct cmd *cmd);
 #include <payload.h>
 #include <expression.h>
 
+struct eval_recursion {
+	uint16_t binop;
+	uint16_t list;
+};
+
 /**
  * struct eval_ctx - evaluation context
  *
@@ -763,7 +827,7 @@ extern void cmd_free(struct cmd *cmd);
  * @set:	current set
  * @stmt:	current statement
  * @stmt_len:	current statement template length
- * @recursion:  expr evaluation recursion counter
+ * @recursion:  expr evaluation recursion counters
  * @cache:	cache context
  * @debug_mask: debugging bitmask
  * @ectx:	expression context
@@ -779,7 +843,7 @@ struct eval_ctx {
 	struct set		*set;
 	struct stmt		*stmt;
 	uint32_t		stmt_len;
-	uint32_t		recursion;
+	struct eval_recursion	recursion;
 	struct expr_ctx		ectx;
 	struct proto_ctx	_pctx[2];
 	const struct proto_desc	*inner_desc;

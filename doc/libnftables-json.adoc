@@ -200,6 +200,18 @@ Rename a chain. The new name is expected in a dedicated property named
 
 == RULESET ELEMENTS
 
+=== RULESET
+[verse]
+____
+*{ "ruleset":* 'RULSET_PROPERTIES' *}*
+
+'RULESET_PROPERTIES' := *null* | *{ "family":* 'STRING' *}*
+____
+
+This is a special object for use with *list* and *flush* commands which will
+then operate on either the whole ruleset or the parts of it belonging to the
+given family.
+
 === TABLE
 [verse]
 ____
@@ -317,7 +329,7 @@ ____
 	"handle":* 'NUMBER'*,
 	"type":* 'SET_TYPE'*,
 	"policy":* 'SET_POLICY'*,
-	"flags": [* 'SET_FLAG_LIST' *],
+	"flags":* 'SET_FLAGS'*,
 	"elem":* 'SET_ELEMENTS'*,
 	"timeout":* 'NUMBER'*,
 	"gc-interval":* 'NUMBER'*,
@@ -333,7 +345,7 @@ ____
 	"type":* 'SET_TYPE'*,
 	"map":* 'STRING'*,
 	"policy":* 'SET_POLICY'*,
-	"flags": [* 'SET_FLAG_LIST' *],
+	"flags":* 'SET_FLAGS'*,
 	"elem":* 'SET_ELEMENTS'*,
 	"timeout":* 'NUMBER'*,
 	"gc-interval":* 'NUMBER'*,
@@ -341,9 +353,10 @@ ____
 	"auto-merge":* 'BOOLEAN'
 *}}*
 
-'SET_TYPE' := 'STRING' | *[* 'SET_TYPE_LIST' *]*
+'SET_TYPE' := 'STRING' | *[* 'SET_TYPE_LIST' *]* | *{ "typeof":* 'EXPRESSION' *}*
 'SET_TYPE_LIST' := 'STRING' [*,* 'SET_TYPE_LIST' ]
 'SET_POLICY' := *"performance"* | *"memory"*
+'SET_FLAGS' := 'SET_FLAG' | *[* 'SET_FLAG_LIST' *]*
 'SET_FLAG_LIST' := 'SET_FLAG' [*,* 'SET_FLAG_LIST' ]
 'SET_FLAG' := *"constant"* | *"interval"* | *"timeout"*
 'SET_ELEMENTS' := 'EXPRESSION' | *[* 'EXPRESSION_LIST' *]*
@@ -381,8 +394,9 @@ that they translate a unique key to a value.
 	Automatic merging of adjacent/overlapping set elements in interval sets.
 
 ==== TYPE
-The set type might be a string, such as *"ipv4_addr"* or an array
-consisting of strings (for concatenated types).
+The set type might be a string, such as *"ipv4_addr"*, an array
+consisting of strings (for concatenated types) or a *typeof* object containing
+an expression to extract the type from.
 
 ==== ELEM
 A single set element might be given as string, integer or boolean value for

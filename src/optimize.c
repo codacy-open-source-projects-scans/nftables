@@ -38,6 +38,8 @@ static bool __expr_cmp(const struct expr *expr_a, const struct expr *expr_b)
 {
 	if (expr_a->etype != expr_b->etype)
 		return false;
+	if (expr_a->len != expr_b->len)
+		return false;
 
 	switch (expr_a->etype) {
 	case EXPR_PAYLOAD:
@@ -125,7 +127,19 @@ static bool __expr_cmp(const struct expr *expr_a, const struct expr *expr_b)
 			return false;
 		break;
 	case EXPR_BINOP:
-		return __expr_cmp(expr_a->left, expr_b->left);
+		if (!__expr_cmp(expr_a->left, expr_b->left))
+			return false;
+
+		return __expr_cmp(expr_a->right, expr_b->right);
+	case EXPR_SYMBOL:
+		if (expr_a->symtype != expr_b->symtype)
+			return false;
+		if (expr_a->symtype != SYMBOL_VALUE)
+			return false;
+
+		return !strcmp(expr_a->identifier, expr_b->identifier);
+	case EXPR_VALUE:
+		return !mpz_cmp(expr_a->value, expr_b->value);
 	default:
 		return false;
 	}
@@ -133,16 +147,41 @@ static bool __expr_cmp(const struct expr *expr_a, const struct expr *expr_b)
 	return true;
 }
 
+static bool is_bitmask(const struct expr *expr)
+{
+	switch (expr->etype) {
+	case EXPR_BINOP:
+		if (expr->op == OP_OR &&
+		    !is_bitmask(expr->left))
+			return false;
+
+		return is_bitmask(expr->right);
+	case EXPR_VALUE:
+	case EXPR_SYMBOL:
+		return true;
+	default:
+		break;
+	}
+
+	return false;
+}
+
 static bool stmt_expr_supported(const struct expr *expr)
 {
 	switch (expr->right->etype) {
 	case EXPR_SYMBOL:
+	case EXPR_RANGE_SYMBOL:
 	case EXPR_RANGE:
+	case EXPR_RANGE_VALUE:
 	case EXPR_PREFIX:
 	case EXPR_SET:
 	case EXPR_LIST:
 	case EXPR_VALUE:
 		return true;
+	case EXPR_BINOP:
+		if (is_bitmask(expr->right))
+			return true;
+		break;
 	default:
 		break;
 	}
@@ -161,10 +200,10 @@ static bool __stmt_type_eq(const struct stmt *stmt_a, const struct stmt *stmt_b,
 {
 	struct expr *expr_a, *expr_b;
 
-	if (stmt_a->ops->type != stmt_b->ops->type)
+	if (stmt_a->type != stmt_b->type)
 		return false;
 
-	switch (stmt_a->ops->type) {
+	switch (stmt_a->type) {
 	case STMT_EXPRESSION:
 		expr_a = stmt_a->expr;
 		expr_b = stmt_b->expr;
@@ -232,7 +271,7 @@ static bool __stmt_type_eq(const struct stmt *stmt_a, const struct stmt *stmt_b,
 		if (!stmt_a->reject.expr)
 			return true;
 
-		if (__expr_cmp(stmt_a->reject.expr, stmt_b->reject.expr))
+		if (!__expr_cmp(stmt_a->reject.expr, stmt_b->reject.expr))
 			return false;
 		break;
 	case STMT_NAT:
@@ -302,13 +341,18 @@ static bool __stmt_type_eq(const struct stmt *stmt_a, const struct stmt *stmt_b,
 
 static bool expr_verdict_eq(const struct expr *expr_a, const struct expr *expr_b)
 {
+	char chain_a[NFT_CHAIN_MAXNAMELEN];
+	char chain_b[NFT_CHAIN_MAXNAMELEN];
+
 	if (expr_a->verdict != expr_b->verdict)
 		return false;
 	if (expr_a->chain && expr_b->chain) {
-		if (expr_a->chain->etype != expr_b->chain->etype)
+		if (expr_a->chain->etype != EXPR_VALUE ||
+		    expr_a->chain->etype != expr_b->chain->etype)
 			return false;
-		if (expr_a->chain->etype == EXPR_VALUE &&
-		    strcmp(expr_a->chain->identifier, expr_b->chain->identifier))
+		expr_chain_export(expr_a->chain, chain_a);
+		expr_chain_export(expr_b->chain, chain_b);
+		if (strcmp(chain_a, chain_b))
 			return false;
 	} else if (expr_a->chain || expr_b->chain) {
 		return false;
@@ -321,7 +365,7 @@ static bool stmt_verdict_eq(const struct stmt *stmt_a, const struct stmt *stmt_b
 {
 	struct expr *expr_a, *expr_b;
 
-	assert (stmt_a->ops->type == STMT_VERDICT);
+	assert (stmt_a->type == STMT_VERDICT);
 
 	expr_a = stmt_a->expr;
 	expr_b = stmt_b->expr;
@@ -342,14 +386,14 @@ static bool stmt_type_find(struct optimize_ctx *ctx, const struct stmt *stmt)
 	uint32_t i;
 
 	for (i = 0; i < ctx->num_stmts; i++) {
-		if (ctx->stmt[i]->ops->type == STMT_INVALID)
+		if (ctx->stmt[i]->type == STMT_INVALID)
 			unsupported_exists = true;
 
 		if (__stmt_type_eq(stmt, ctx->stmt[i], false))
 			return true;
 	}
 
-	switch (stmt->ops->type) {
+	switch (stmt->type) {
 	case STMT_EXPRESSION:
 	case STMT_VERDICT:
 	case STMT_COUNTER:
@@ -368,13 +412,9 @@ static bool stmt_type_find(struct optimize_ctx *ctx, const struct stmt *stmt)
 	return false;
 }
 
-static struct stmt_ops unsupported_stmt_ops = {
-	.type	= STMT_INVALID,
-	.name	= "unsupported",
-};
-
 static int rule_collect_stmts(struct optimize_ctx *ctx, struct rule *rule)
 {
+	const struct stmt_ops *ops;
 	struct stmt *stmt, *clone;
 
 	list_for_each_entry(stmt, &rule->stmts, list) {
@@ -384,16 +424,17 @@ static int rule_collect_stmts(struct optimize_ctx *ctx, struct rule *rule)
 		/* No refcounter available in statement objects, clone it to
 		 * to store in the array of selectors.
 		 */
-		clone = stmt_alloc(&internal_location, stmt->ops);
-		switch (stmt->ops->type) {
+		ops = stmt_ops(stmt);
+		clone = stmt_alloc(&internal_location, ops);
+		switch (stmt->type) {
 		case STMT_EXPRESSION:
 			if (stmt->expr->op != OP_IMPLICIT &&
 			    stmt->expr->op != OP_EQ) {
-				clone->ops = &unsupported_stmt_ops;
+				clone->type = STMT_INVALID;
 				break;
 			}
 			if (stmt->expr->left->etype == EXPR_CONCAT) {
-				clone->ops = &unsupported_stmt_ops;
+				clone->type = STMT_INVALID;
 				break;
 			}
 			/* fall-through */
@@ -415,7 +456,7 @@ static int rule_collect_stmts(struct optimize_ctx *ctx, struct rule *rule)
 			    (stmt->nat.proto &&
 			     (stmt->nat.proto->etype == EXPR_MAP ||
 			      stmt->nat.proto->etype == EXPR_VARIABLE))) {
-				clone->ops = &unsupported_stmt_ops;
+				clone->type = STMT_INVALID;
 				break;
 			}
 			clone->nat.type = stmt->nat.type;
@@ -435,7 +476,7 @@ static int rule_collect_stmts(struct optimize_ctx *ctx, struct rule *rule)
 			clone->reject.family = stmt->reject.family;
 			break;
 		default:
-			clone->ops = &unsupported_stmt_ops;
+			clone->type = STMT_INVALID;
 			break;
 		}
 
@@ -452,7 +493,7 @@ static int unsupported_in_stmt_matrix(const struct optimize_ctx *ctx)
 	uint32_t i;
 
 	for (i = 0; i < ctx->num_stmts; i++) {
-		if (ctx->stmt[i]->ops->type == STMT_INVALID)
+		if (ctx->stmt[i]->type == STMT_INVALID)
 			return i;
 	}
 	/* this should not happen. */
@@ -472,7 +513,7 @@ static int cmd_stmt_find_in_stmt_matrix(struct optimize_ctx *ctx, struct stmt *s
 }
 
 static struct stmt unsupported_stmt = {
-	.ops	= &unsupported_stmt_ops,
+	.type	= STMT_INVALID,
 };
 
 static void rule_build_stmt_matrix_stmts(struct optimize_ctx *ctx,
@@ -499,7 +540,7 @@ static int stmt_verdict_find(const struct optimize_ctx *ctx)
 	uint32_t i;
 
 	for (i = 0; i < ctx->num_stmts; i++) {
-		if (ctx->stmt[i]->ops->type != STMT_VERDICT)
+		if (ctx->stmt[i]->type != STMT_VERDICT)
 			continue;
 
 		return i;
@@ -515,6 +556,8 @@ struct merge {
 	/* statements to be merged (index relative to statement matrix) */
 	uint32_t	stmt[MAX_STMTS];
 	uint32_t	num_stmts;
+	/* merge has been invalidated */
+	bool		skip;
 };
 
 static void merge_expr_stmts(const struct optimize_ctx *ctx,
@@ -527,17 +570,17 @@ static void merge_expr_stmts(const struct optimize_ctx *ctx,
 	uint32_t i;
 
 	set = set_expr_alloc(&internal_location, NULL);
-	set->set_flags |= NFT_SET_ANONYMOUS;
+	expr_set(set)->set_flags |= NFT_SET_ANONYMOUS;
 
 	expr_a = stmt_a->expr->right;
 	elem = set_elem_expr_alloc(&internal_location, expr_get(expr_a));
-	compound_expr_add(set, elem);
+	set_expr_add(set, elem);
 
 	for (i = from + 1; i <= to; i++) {
 		stmt_b = ctx->stmt_matrix[i][merge->stmt[0]];
 		expr_b = stmt_b->expr->right;
 		elem = set_elem_expr_alloc(&internal_location, expr_get(expr_b));
-		compound_expr_add(set, elem);
+		set_expr_add(set, elem);
 	}
 
 	expr_free(stmt_a->expr->right);
@@ -550,9 +593,9 @@ static void merge_vmap(const struct optimize_ctx *ctx,
 	struct expr *mappings, *mapping, *expr;
 
 	mappings = stmt_b->expr->mappings;
-	list_for_each_entry(expr, &mappings->expressions, list) {
+	list_for_each_entry(expr, &expr_set(mappings)->expressions, list) {
 		mapping = expr_clone(expr);
-		compound_expr_add(stmt_a->expr->mappings, mapping);
+		set_expr_add(stmt_a->expr->mappings, mapping);
 	}
 }
 
@@ -566,7 +609,7 @@ static void merge_verdict_stmts(const struct optimize_ctx *ctx,
 
 	for (i = from + 1; i <= to; i++) {
 		stmt_b = ctx->stmt_matrix[i][merge->stmt[0]];
-		switch (stmt_b->ops->type) {
+		switch (stmt_b->type) {
 		case STMT_VERDICT:
 			switch (stmt_b->expr->etype) {
 			case EXPR_MAP:
@@ -588,7 +631,7 @@ static void merge_stmts(const struct optimize_ctx *ctx,
 {
 	struct stmt *stmt_a = ctx->stmt_matrix[from][merge->stmt[0]];
 
-	switch (stmt_a->ops->type) {
+	switch (stmt_a->type) {
 	case STMT_EXPRESSION:
 		merge_expr_stmts(ctx, from, to, merge, stmt_a);
 		break;
@@ -616,10 +659,10 @@ static void __merge_concat(const struct optimize_ctx *ctx, uint32_t i,
 			stmt_a = ctx->stmt_matrix[i][merge->stmt[k]];
 			switch (stmt_a->expr->right->etype) {
 			case EXPR_SET:
-				list_for_each_entry(expr, &stmt_a->expr->right->expressions, list) {
+				list_for_each_entry(expr, &expr_set(stmt_a->expr->right)->expressions, list) {
 					concat_clone = expr_clone(concat);
 					clone = expr_clone(expr->key);
-					compound_expr_add(concat_clone, clone);
+					concat_expr_add(concat_clone, clone);
 					list_add_tail(&concat_clone->list, &pending_list);
 				}
 				list_del(&concat->list);
@@ -628,9 +671,21 @@ static void __merge_concat(const struct optimize_ctx *ctx, uint32_t i,
 			case EXPR_SYMBOL:
 			case EXPR_VALUE:
 			case EXPR_PREFIX:
+			case EXPR_RANGE_SYMBOL:
 			case EXPR_RANGE:
+			case EXPR_RANGE_VALUE:
 				clone = expr_clone(stmt_a->expr->right);
-				compound_expr_add(concat, clone);
+				concat_expr_add(concat, clone);
+				break;
+			case EXPR_LIST:
+				list_for_each_entry(expr, &expr_list(stmt_a->expr->right)->expressions, list) {
+					concat_clone = expr_clone(concat);
+					clone = expr_clone(expr);
+					concat_expr_add(concat_clone, clone);
+					list_add_tail(&concat_clone->list, &pending_list);
+				}
+				list_del(&concat->list);
+				expr_free(concat);
 				break;
 			default:
 				assert(0);
@@ -652,7 +707,7 @@ static void __merge_concat_stmts(const struct optimize_ctx *ctx, uint32_t i,
 	list_for_each_entry_safe(concat, next, &concat_list, list) {
 		list_del(&concat->list);
 		elem = set_elem_expr_alloc(&internal_location, concat);
-		compound_expr_add(set, elem);
+		set_expr_add(set, elem);
 	}
 }
 
@@ -670,14 +725,14 @@ static void merge_concat_stmts(const struct optimize_ctx *ctx,
 
 	for (k = 0; k < merge->num_stmts; k++) {
 		stmt_a = ctx->stmt_matrix[from][merge->stmt[k]];
-		compound_expr_add(concat, expr_get(stmt_a->expr->left));
+		concat_expr_add(concat, expr_get(stmt_a->expr->left));
 	}
 	expr_free(stmt->expr->left);
 	stmt->expr->left = concat;
 
 	/* build set data contenation, eg. { eth0 . 1.1.1.1 . 22 } */
 	set = set_expr_alloc(&internal_location, NULL);
-	set->set_flags |= NFT_SET_ANONYMOUS;
+	expr_set(set)->set_flags |= NFT_SET_ANONYMOUS;
 
 	for (i = from; i <= to; i++)
 		__merge_concat_stmts(ctx, i, merge, set);
@@ -700,7 +755,7 @@ static void build_verdict_map(struct expr *expr, struct stmt *verdict,
 
 	switch (expr->etype) {
 	case EXPR_LIST:
-		list_for_each_entry(item, &expr->expressions, list) {
+		list_for_each_entry(item, &expr_list(expr)->expressions, list) {
 			elem = set_elem_expr_alloc(&internal_location, expr_get(item));
 			if (counter) {
 				counter_elem = counter_stmt_alloc(&counter->location);
@@ -709,12 +764,12 @@ static void build_verdict_map(struct expr *expr, struct stmt *verdict,
 
 			mapping = mapping_expr_alloc(&internal_location, elem,
 						     expr_get(verdict->expr));
-			compound_expr_add(set, mapping);
+			set_expr_add(set, mapping);
 		}
 		stmt_free(counter);
 		break;
 	case EXPR_SET:
-		list_for_each_entry(item, &expr->expressions, list) {
+		list_for_each_entry(item, &expr_set(expr)->expressions, list) {
 			elem = set_elem_expr_alloc(&internal_location, expr_get(item->key));
 			if (counter) {
 				counter_elem = counter_stmt_alloc(&counter->location);
@@ -723,12 +778,14 @@ static void build_verdict_map(struct expr *expr, struct stmt *verdict,
 
 			mapping = mapping_expr_alloc(&internal_location, elem,
 						     expr_get(verdict->expr));
-			compound_expr_add(set, mapping);
+			set_expr_add(set, mapping);
 		}
 		stmt_free(counter);
 		break;
 	case EXPR_PREFIX:
+	case EXPR_RANGE_SYMBOL:
 	case EXPR_RANGE:
+	case EXPR_RANGE_VALUE:
 	case EXPR_VALUE:
 	case EXPR_SYMBOL:
 	case EXPR_CONCAT:
@@ -738,7 +795,7 @@ static void build_verdict_map(struct expr *expr, struct stmt *verdict,
 
 		mapping = mapping_expr_alloc(&internal_location, elem,
 					     expr_get(verdict->expr));
-		compound_expr_add(set, mapping);
+		set_expr_add(set, mapping);
 		break;
 	default:
 		assert(0);
@@ -757,7 +814,7 @@ static void remove_counter(const struct optimize_ctx *ctx, uint32_t from)
 		if (!stmt)
 			continue;
 
-		if (stmt->ops->type == STMT_COUNTER) {
+		if (stmt->type == STMT_COUNTER) {
 			list_del(&stmt->list);
 			stmt_free(stmt);
 		}
@@ -775,7 +832,7 @@ static struct stmt *zap_counter(const struct optimize_ctx *ctx, uint32_t from)
 		if (!stmt)
 			continue;
 
-		if (stmt->ops->type == STMT_COUNTER) {
+		if (stmt->type == STMT_COUNTER) {
 			list_del(&stmt->list);
 			return stmt;
 		}
@@ -799,7 +856,7 @@ static void merge_stmts_vmap(const struct optimize_ctx *ctx,
 	assert(k >= 0);
 
 	set = set_expr_alloc(&internal_location, NULL);
-	set->set_flags |= NFT_SET_ANONYMOUS;
+	expr_set(set)->set_flags |= NFT_SET_ANONYMOUS;
 
 	expr_a = stmt_a->expr->right;
 	verdict_a = ctx->stmt_matrix[from][k];
@@ -846,7 +903,7 @@ static void __merge_concat_stmts_vmap(const struct optimize_ctx *ctx,
 
 		mapping = mapping_expr_alloc(&internal_location, elem,
 					     expr_get(verdict->expr));
-		compound_expr_add(set, mapping);
+		set_expr_add(set, mapping);
 	}
 	stmt_free(counter);
 }
@@ -868,12 +925,12 @@ static void merge_concat_stmts_vmap(const struct optimize_ctx *ctx,
 	concat_a = concat_expr_alloc(&internal_location);
 	for (i = 0; i < merge->num_stmts; i++) {
 		stmt_a = ctx->stmt_matrix[from][merge->stmt[i]];
-		compound_expr_add(concat_a, expr_get(stmt_a->expr->left));
+		concat_expr_add(concat_a, expr_get(stmt_a->expr->left));
 	}
 
 	/* build set data contenation, eg. { eth0 . 1.1.1.1 . 22 : accept } */
 	set = set_expr_alloc(&internal_location, NULL);
-	set->set_flags |= NFT_SET_ANONYMOUS;
+	expr_set(set)->set_flags |= NFT_SET_ANONYMOUS;
 
 	for (i = from; i <= to; i++) {
 		verdict = ctx->stmt_matrix[i][k];
@@ -932,7 +989,7 @@ static int stmt_nat_type(const struct optimize_ctx *ctx, int from,
 		if (!ctx->stmt_matrix[from][j])
 			continue;
 
-		if (ctx->stmt_matrix[from][j]->ops->type == STMT_NAT) {
+		if (ctx->stmt_matrix[from][j]->type == STMT_NAT) {
 			*nat_type = ctx->stmt_matrix[from][j]->nat.type;
 			return 0;
 		}
@@ -950,7 +1007,7 @@ static int stmt_nat_find(const struct optimize_ctx *ctx, int from)
 		return -1;
 
 	for (i = 0; i < ctx->num_stmts; i++) {
-		if (ctx->stmt[i]->ops->type != STMT_NAT ||
+		if (ctx->stmt[i]->type != STMT_NAT ||
 		    ctx->stmt[i]->nat.type != nat_type)
 			continue;
 
@@ -964,13 +1021,13 @@ static struct expr *stmt_nat_expr(struct stmt *nat_stmt)
 {
 	struct expr *nat_expr;
 
-	assert(nat_stmt->ops->type == STMT_NAT);
+	assert(nat_stmt->type == STMT_NAT);
 
 	if (nat_stmt->nat.proto) {
 		if (nat_stmt->nat.addr) {
 			nat_expr = concat_expr_alloc(&internal_location);
-			compound_expr_add(nat_expr, expr_get(nat_stmt->nat.addr));
-			compound_expr_add(nat_expr, expr_get(nat_stmt->nat.proto));
+			concat_expr_add(nat_expr, expr_get(nat_stmt->nat.addr));
+			concat_expr_add(nat_expr, expr_get(nat_stmt->nat.proto));
 		} else {
 			nat_expr = expr_get(nat_stmt->nat.proto);
 		}
@@ -998,7 +1055,7 @@ static void merge_nat(const struct optimize_ctx *ctx,
 	assert(k >= 0);
 
 	set = set_expr_alloc(&internal_location, NULL);
-	set->set_flags |= NFT_SET_ANONYMOUS;
+	expr_set(set)->set_flags |= NFT_SET_ANONYMOUS;
 
 	for (i = from; i <= to; i++) {
 		stmt = ctx->stmt_matrix[i][merge->stmt[0]];
@@ -1009,7 +1066,7 @@ static void merge_nat(const struct optimize_ctx *ctx,
 
 		elem = set_elem_expr_alloc(&internal_location, expr_get(expr));
 		mapping = mapping_expr_alloc(&internal_location, elem, nat_expr);
-		compound_expr_add(set, mapping);
+		set_expr_add(set, mapping);
 	}
 
 	stmt = ctx->stmt_matrix[from][merge->stmt[0]];
@@ -1050,7 +1107,7 @@ static void merge_concat_nat(const struct optimize_ctx *ctx,
 	assert(k >= 0);
 
 	set = set_expr_alloc(&internal_location, NULL);
-	set->set_flags |= NFT_SET_ANONYMOUS;
+	expr_set(set)->set_flags |= NFT_SET_ANONYMOUS;
 
 	for (i = from; i <= to; i++) {
 
@@ -1058,7 +1115,7 @@ static void merge_concat_nat(const struct optimize_ctx *ctx,
 		for (j = 0; j < merge->num_stmts; j++) {
 			stmt = ctx->stmt_matrix[i][merge->stmt[j]];
 			expr = stmt->expr->right;
-			compound_expr_add(concat, expr_get(expr));
+			concat_expr_add(concat, expr_get(expr));
 		}
 
 		nat_stmt = ctx->stmt_matrix[i][k];
@@ -1066,7 +1123,7 @@ static void merge_concat_nat(const struct optimize_ctx *ctx,
 
 		elem = set_elem_expr_alloc(&internal_location, concat);
 		mapping = mapping_expr_alloc(&internal_location, elem, nat_expr);
-		compound_expr_add(set, mapping);
+		set_expr_add(set, mapping);
 	}
 
 	concat = concat_expr_alloc(&internal_location);
@@ -1079,7 +1136,7 @@ static void merge_concat_nat(const struct optimize_ctx *ctx,
 			else if (left->payload.desc == &proto_ip6)
 				family = NFPROTO_IPV6;
 		}
-		compound_expr_add(concat, expr_get(left));
+		concat_expr_add(concat, expr_get(left));
 	}
 	expr = map_expr_alloc(&internal_location, concat, set);
 
@@ -1124,7 +1181,7 @@ static void rule_optimize_print(struct output_ctx *octx,
 	case INDESC_NETLINK:
 		break;
 	default:
-		BUG("invalid input descriptor type %u\n", indesc->type);
+		BUG("invalid input descriptor type %u", indesc->type);
 	}
 
 	print_location(octx->error_fp, indesc, loc);
@@ -1148,7 +1205,7 @@ static uint32_t merge_stmt_type(const struct optimize_ctx *ctx,
 			stmt = ctx->stmt_matrix[i][j];
 			if (!stmt)
 				continue;
-			if (stmt->ops->type == STMT_NAT) {
+			if (stmt->type == STMT_NAT) {
 				if ((stmt->nat.type == NFT_NAT_REDIR &&
 				     !stmt->nat.proto) ||
 				    stmt->nat.type == NFT_NAT_MASQ)
@@ -1245,7 +1302,7 @@ static bool stmt_is_mergeable(const struct stmt *stmt)
 	if (!stmt)
 		return false;
 
-	switch (stmt->ops->type) {
+	switch (stmt->type) {
 	case STMT_VERDICT:
 		if (stmt->expr->etype == EXPR_MAP)
 			return true;
@@ -1334,14 +1391,48 @@ static int chain_optimize(struct nft_ctx *nft, struct list_head *rules)
 		}
 	}
 
-	/* Step 4: Infer how to merge the candidate rules */
+	/* Step 4: Invalidate merge in case of duplicated keys in set/map. */
 	for (k = 0; k < num_merges; k++) {
+		uint32_t r1, r2;
+
+		i = merge[k].rule_from;
+
+		for (r1 = i; r1 < i + merge[k].num_rules; r1++) {
+			for (r2 = r1 + 1; r2 < i + merge[k].num_rules; r2++) {
+				bool match_same_value = true, match_seen = false;
+
+				for (m = 0; m < ctx->num_stmts; m++) {
+					if (!ctx->stmt_matrix[r1][m])
+						continue;
+
+					switch (ctx->stmt_matrix[r1][m]->type) {
+					case STMT_EXPRESSION:
+						match_seen = true;
+						if (!__expr_cmp(ctx->stmt_matrix[r1][m]->expr->right,
+							        ctx->stmt_matrix[r2][m]->expr->right))
+							match_same_value = false;
+						break;
+					default:
+						break;
+					}
+				}
+				if (match_seen && match_same_value)
+					merge[k].skip = true;
+			}
+		}
+	}
+
+	/* Step 5: Infer how to merge the candidate rules */
+	for (k = 0; k < num_merges; k++) {
+		if (merge[k].skip)
+			continue;
+
 		i = merge[k].rule_from;
 
 		for (m = 0; m < ctx->num_stmts; m++) {
 			if (!ctx->stmt_matrix[i][m])
 				continue;
-			switch (ctx->stmt_matrix[i][m]->ops->type) {
+			switch (ctx->stmt_matrix[i][m]->type) {
 			case STMT_EXPRESSION:
 				merge[k].stmt[merge[k].num_stmts++] = m;
 				break;

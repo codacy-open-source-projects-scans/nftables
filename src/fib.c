@@ -53,8 +53,17 @@ const struct datatype fib_addr_type = {
 	.sym_tbl	= &addrtype_tbl,
 };
 
-const char *fib_result_str(enum nft_fib_result result)
+const char *fib_result_str(const struct expr *expr, bool check)
 {
+	enum nft_fib_result result = expr->fib.result;
+	uint32_t flags = expr->fib.flags;
+
+	/* Exception: check if route exists. */
+	if (check &&
+	    result == NFT_FIB_RESULT_OIF &&
+	    flags & NFTA_FIB_F_PRESENT)
+		return "check";
+
 	if (result <= NFT_FIB_RESULT_MAX)
 		return fib_result[result];
 
@@ -87,7 +96,7 @@ static void fib_expr_print(const struct expr *expr, struct output_ctx *octx)
 	if (flags)
 		nft_print(octx, "0x%x", flags);
 
-	nft_print(octx, " %s", fib_result_str(expr->fib.result));
+	nft_print(octx, " %s", fib_result_str(expr, true));
 }
 
 static bool fib_expr_cmp(const struct expr *e1, const struct expr *e2)
@@ -179,18 +188,20 @@ struct expr *fib_expr_alloc(const struct location *loc,
 		type = &ifindex_type;
 		break;
 	case NFT_FIB_RESULT_OIFNAME:
-		type = &string_type;
+		type = &ifname_type;
 		len = IFNAMSIZ * BITS_PER_BYTE;
 		break;
 	case NFT_FIB_RESULT_ADDRTYPE:
 		type = &fib_addr_type;
 		break;
 	default:
-		BUG("Unknown result %d\n", result);
+		BUG("Unknown result %d", result);
 	}
 
-	if (flags & NFTA_FIB_F_PRESENT)
+	if (flags & NFTA_FIB_F_PRESENT) {
 		type = &boolean_type;
+		len = BITS_PER_BYTE;
+	}
 
 	expr = expr_alloc(loc, EXPR_FIB, type,
 			  BYTEORDER_HOST_ENDIAN, len);

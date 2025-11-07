@@ -96,7 +96,7 @@ _msg() {
 		printf '%s\n' "$level: $*"
 	fi
 	if [ "$level" = E ] ; then
-		exit 1
+		exit 99
 	fi
 }
 
@@ -784,7 +784,7 @@ check_kmemleak()
 
 read kernel_tainted < /proc/sys/kernel/tainted
 if [ "$kernel_tainted" -ne 0 ] ; then
-	msg_warn "kernel is tainted"
+	msg_warn "kernel is tainted ($kernel_tainted)"
 	echo
 fi
 

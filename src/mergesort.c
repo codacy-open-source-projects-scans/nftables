@@ -18,7 +18,7 @@ static void concat_expr_msort_value(const struct expr *expr, mpz_t value)
 	const struct expr *i;
 	char data[512];
 
-	list_for_each_entry(i, &expr->expressions, list) {
+	list_for_each_entry(i, &expr_concat(expr)->expressions, list) {
 		ilen = div_round_up(i->len, BITS_PER_BYTE);
 		mpz_export_data(data + len, i->value, i->byteorder, ilen);
 		len += ilen;
@@ -38,6 +38,8 @@ static mpz_srcptr expr_msort_value(const struct expr *expr, mpz_t value)
 		return expr_msort_value(expr->left, value);
 	case EXPR_VALUE:
 		return expr->value;
+	case EXPR_RANGE_VALUE:
+		return expr->range.low;
 	case EXPR_CONCAT:
 		concat_expr_msort_value(expr, value);
 		break;
@@ -46,7 +48,7 @@ static mpz_srcptr expr_msort_value(const struct expr *expr, mpz_t value)
 		mpz_bitmask(value, expr->len);
 		break;
 	default:
-		BUG("Unknown expression %s\n", expr_name(expr));
+		BUG("Unknown expression %s", expr_name(expr));
 	}
 	return value;
 }

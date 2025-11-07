@@ -443,6 +443,8 @@ static int nft_handle_validate(const struct cmd *cmd, struct list_head *msgs)
 	case CMD_OBJ_CT_TIMEOUTS:
 	case CMD_OBJ_CT_EXPECT:
 	case CMD_OBJ_CT_EXPECTATIONS:
+	case CMD_OBJ_TUNNEL:
+	case CMD_OBJ_TUNNELS:
 		if (h->table.name &&
 		    strlen(h->table.name) > NFT_NAME_MAXLEN) {
 			loc = &h->table.location;
@@ -534,10 +536,7 @@ int nft_cache_evaluate(struct nft_ctx *nft, struct list_head *cmds,
 
 void table_cache_add(struct table *table, struct nft_cache *cache)
 {
-	uint32_t hash;
-
-	hash = djb_hash(table->handle.table.name) % NFT_CACHE_HSIZE;
-	cache_add(&table->cache, &cache->table_cache, hash);
+	cache_add(&table->cache, &cache->table_cache, table->handle.table.name);
 }
 
 void table_cache_del(struct table *table)
@@ -551,8 +550,7 @@ struct table *table_cache_find(const struct cache *cache,
 	struct table *table;
 	uint32_t hash;
 
-	if (!name)
-		return NULL;
+	assert(name);
 
 	hash = djb_hash(name) % NFT_CACHE_HSIZE;
 	list_for_each_entry(table, &cache->ht[hash], cache.hlist) {
@@ -573,8 +571,8 @@ static int chain_cache_cb(struct nftnl_chain *nlc, void *arg)
 {
 	struct chain_cache_dump_ctx *ctx = arg;
 	const char *chain_name, *table_name;
-	uint32_t hash, family;
 	struct chain *chain;
+	uint32_t family;
 
 	table_name = nftnl_chain_get_str(nlc, NFTNL_CHAIN_TABLE);
 	family = nftnl_chain_get_u32(nlc, NFTNL_CHAIN_FAMILY);
@@ -584,13 +582,12 @@ static int chain_cache_cb(struct nftnl_chain *nlc, void *arg)
 		return 0;
 
 	chain_name = nftnl_chain_get_str(nlc, NFTNL_CHAIN_NAME);
-	hash = djb_hash(chain_name) % NFT_CACHE_HSIZE;
-	chain = netlink_delinearize_chain(ctx->nlctx, nlc);
 
+	chain = netlink_delinearize_chain(ctx->nlctx, nlc);
 	if (chain->flags & CHAIN_F_BINDING) {
 		list_add_tail(&chain->cache.list, &ctx->table->chain_bindings);
 	} else {
-		cache_add(&chain->cache, &ctx->table->chain_cache, hash);
+		cache_add(&chain->cache, &ctx->table->chain_cache, chain_name);
 	}
 
 	nftnl_chain_list_del(nlc);
@@ -656,10 +653,7 @@ void nft_chain_cache_update(struct netlink_ctx *ctx, struct table *table,
 
 void chain_cache_add(struct chain *chain, struct table *table)
 {
-	uint32_t hash;
-
-	hash = djb_hash(chain->handle.chain.name) % NFT_CACHE_HSIZE;
-	cache_add(&chain->cache, &table->chain_cache, hash);
+	cache_add(&chain->cache, &table->chain_cache, chain->handle.chain.name);
 }
 
 void chain_cache_del(struct chain *chain)
@@ -671,6 +665,8 @@ struct chain *chain_cache_find(const struct table *table, const char *name)
 {
 	struct chain *chain;
 	uint32_t hash;
+
+	assert(name);
 
 	hash = djb_hash(name) % NFT_CACHE_HSIZE;
 	list_for_each_entry(chain, &table->chain_cache.ht[hash], cache.hlist) {
@@ -714,6 +710,7 @@ static int rule_cache_dump(struct netlink_ctx *ctx, const struct handle *h,
 	const char *chain = NULL;
 	uint64_t rule_handle = 0;
 	int family = h->family;
+	bool reset = false;
 	bool dump = true;
 
 	if (filter) {
@@ -727,11 +724,12 @@ static int rule_cache_dump(struct netlink_ctx *ctx, const struct handle *h,
 		}
 		if (filter->list.family)
 			family = filter->list.family;
+
+		reset = filter->reset.rule;
 	}
 
 	rule_cache = mnl_nft_rule_dump(ctx, family,
-				       table, chain, rule_handle, dump,
-				       filter->reset.rule);
+				       table, chain, rule_handle, dump, reset);
 	if (rule_cache == NULL) {
 		if (errno == EINTR)
 			return -1;
@@ -757,7 +755,6 @@ static int set_cache_cb(struct nftnl_set *nls, void *arg)
 	const char *set_name;
 	uint32_t set_family;
 	struct set *set;
-	uint32_t hash;
 
 	set_table = nftnl_set_get_str(nls, NFTNL_SET_TABLE);
 	set_family = nftnl_set_get_u32(nls, NFTNL_SET_FAMILY);
@@ -771,8 +768,7 @@ static int set_cache_cb(struct nftnl_set *nls, void *arg)
 		return -1;
 
 	set_name = nftnl_set_get_str(nls, NFTNL_SET_NAME);
-	hash = djb_hash(set_name) % NFT_CACHE_HSIZE;
-	cache_add(&set->cache, &ctx->table->set_cache, hash);
+	cache_add(&set->cache, &ctx->table->set_cache, set_name);
 
 	nftnl_set_list_del(nls);
 	nftnl_set_free(nls);
@@ -822,10 +818,7 @@ set_cache_dump(struct netlink_ctx *ctx,
 
 void set_cache_add(struct set *set, struct table *table)
 {
-	uint32_t hash;
-
-	hash = djb_hash(set->handle.set.name) % NFT_CACHE_HSIZE;
-	cache_add(&set->cache, &table->set_cache, hash);
+	cache_add(&set->cache, &table->set_cache, set->handle.set.name);
 }
 
 void set_cache_del(struct set *set)
@@ -837,6 +830,8 @@ struct set *set_cache_find(const struct table *table, const char *name)
 {
 	struct set *set;
 	uint32_t hash;
+
+	assert(name);
 
 	hash = djb_hash(name) % NFT_CACHE_HSIZE;
 	list_for_each_entry(set, &table->set_cache.ht[hash], cache.hlist) {
@@ -859,7 +854,6 @@ static int obj_cache_cb(struct nftnl_obj *nlo, void *arg)
 	const char *obj_name;
 	uint32_t obj_family;
 	struct obj *obj;
-	uint32_t hash;
 
 	obj_table = nftnl_obj_get_str(nlo, NFTNL_OBJ_TABLE);
 	obj_family = nftnl_obj_get_u32(nlo, NFTNL_OBJ_FAMILY);
@@ -869,12 +863,10 @@ static int obj_cache_cb(struct nftnl_obj *nlo, void *arg)
 		return 0;
 
 	obj = netlink_delinearize_obj(ctx->nlctx, nlo);
-	if (!obj)
-		return -1;
-
-	obj_name = nftnl_obj_get_str(nlo, NFTNL_OBJ_NAME);
-	hash = djb_hash(obj_name) % NFT_CACHE_HSIZE;
-	cache_add(&obj->cache, &ctx->table->obj_cache, hash);
+	if (obj) {
+		obj_name = nftnl_obj_get_str(nlo, NFTNL_OBJ_NAME);
+		cache_add(&obj->cache, &ctx->table->obj_cache, obj_name);
+	}
 
 	nftnl_obj_list_del(nlo);
 	nftnl_obj_free(nlo);
@@ -902,6 +894,7 @@ static struct nftnl_obj_list *obj_cache_dump(struct netlink_ctx *ctx,
 	int family = NFPROTO_UNSPEC;
 	const char *table = NULL;
 	const char *obj = NULL;
+	bool reset = false;
 	bool dump = true;
 
 	if (filter) {
@@ -914,9 +907,10 @@ static struct nftnl_obj_list *obj_cache_dump(struct netlink_ctx *ctx,
 		}
 		if (filter->list.obj_type)
 			type = filter->list.obj_type;
+
+		reset = filter->reset.obj;
 	}
-	obj_list = mnl_nft_obj_dump(ctx, family, table, obj, type, dump,
-				    filter->reset.obj);
+	obj_list = mnl_nft_obj_dump(ctx, family, table, obj, type, dump, reset);
 	if (!obj_list) {
                 if (errno == EINTR)
 			return NULL;
@@ -934,10 +928,7 @@ static struct nftnl_obj_list *obj_cache_dump(struct netlink_ctx *ctx,
 
 void obj_cache_add(struct obj *obj, struct table *table)
 {
-	uint32_t hash;
-
-	hash = djb_hash(obj->handle.obj.name) % NFT_CACHE_HSIZE;
-	cache_add(&obj->cache, &table->obj_cache, hash);
+	cache_add(&obj->cache, &table->obj_cache, obj->handle.obj.name);
 }
 
 void obj_cache_del(struct obj *obj)
@@ -950,6 +941,8 @@ struct obj *obj_cache_find(const struct table *table, const char *name,
 {
 	struct obj *obj;
 	uint32_t hash;
+
+	assert(name);
 
 	hash = djb_hash(name) % NFT_CACHE_HSIZE;
 	list_for_each_entry(obj, &table->obj_cache.ht[hash], cache.hlist) {
@@ -973,7 +966,6 @@ static int ft_cache_cb(struct nftnl_flowtable *nlf, void *arg)
 	const char *ft_table;
 	const char *ft_name;
 	uint32_t ft_family;
-	uint32_t hash;
 
 	ft_family = nftnl_flowtable_get_u32(nlf, NFTNL_FLOWTABLE_FAMILY);
 	ft_table = nftnl_flowtable_get_str(nlf, NFTNL_FLOWTABLE_TABLE);
@@ -987,8 +979,7 @@ static int ft_cache_cb(struct nftnl_flowtable *nlf, void *arg)
 		return -1;
 
 	ft_name = nftnl_flowtable_get_str(nlf, NFTNL_FLOWTABLE_NAME);
-	hash = djb_hash(ft_name) % NFT_CACHE_HSIZE;
-	cache_add(&ft->cache, &ctx->table->ft_cache, hash);
+	cache_add(&ft->cache, &ctx->table->ft_cache, ft_name);
 
 	nftnl_flowtable_list_del(nlf);
 	nftnl_flowtable_free(nlf);
@@ -1039,10 +1030,7 @@ ft_cache_dump(struct netlink_ctx *ctx, const struct nft_cache_filter *filter)
 
 void ft_cache_add(struct flowtable *ft, struct table *table)
 {
-	uint32_t hash;
-
-	hash = djb_hash(ft->handle.flowtable.name) % NFT_CACHE_HSIZE;
-	cache_add(&ft->cache, &table->ft_cache, hash);
+	cache_add(&ft->cache, &table->ft_cache, ft->handle.flowtable.name);
 }
 
 void ft_cache_del(struct flowtable *ft)
@@ -1054,6 +1042,8 @@ struct flowtable *ft_cache_find(const struct table *table, const char *name)
 {
 	struct flowtable *ft;
 	uint32_t hash;
+
+	assert(name);
 
 	hash = djb_hash(name) % NFT_CACHE_HSIZE;
 	list_for_each_entry(ft, &table->ft_cache.ht[hash], cache.hlist) {
@@ -1379,8 +1369,11 @@ void cache_free(struct cache *cache)
 	free(cache->ht);
 }
 
-void cache_add(struct cache_item *item, struct cache *cache, uint32_t hash)
+void cache_add(struct cache_item *item, struct cache *cache, const char *name)
 {
+	uint32_t hash;
+
+	hash = djb_hash(name) % NFT_CACHE_HSIZE;
 	list_add_tail(&item->hlist, &cache->ht[hash]);
 	list_add_tail(&item->list, &cache->list);
 }

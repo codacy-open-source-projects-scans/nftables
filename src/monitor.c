@@ -16,7 +16,6 @@
 #include <inttypes.h>
 
 #include <libnftnl/table.h>
-#include <libnftnl/trace.h>
 #include <libnftnl/chain.h>
 #include <libnftnl/expr.h>
 #include <libnftnl/object.h>
@@ -32,6 +31,7 @@
 #include <nftables.h>
 #include <netlink.h>
 #include <mnl.h>
+#include <trace.h>
 #include <expression.h>
 #include <statement.h>
 #include <gmputil.h>
@@ -125,6 +125,19 @@ struct nftnl_obj *netlink_obj_alloc(const struct nlmsghdr *nlh)
 		netlink_abi_error();
 
 	return nlo;
+}
+
+struct nftnl_flowtable *netlink_flowtable_alloc(const struct nlmsghdr *nlh)
+{
+	struct nftnl_flowtable *nlf;
+
+	nlf = nftnl_flowtable_alloc();
+	if (nlf == NULL)
+		memory_allocation_error();
+	if (nftnl_flowtable_nlmsg_parse(nlh, nlf) < 0)
+		netlink_abi_error();
+
+	return nlf;
 }
 
 static uint32_t netlink_msg2nftnl_of(uint32_t type, uint16_t flags)
@@ -224,6 +237,10 @@ static int netlink_events_table_cb(const struct nlmsghdr *nlh, int type,
 
 	nlt = netlink_table_alloc(nlh);
 	t = netlink_delinearize_table(monh->ctx, nlt);
+	if (!t) {
+		nftnl_table_free(nlt);
+		return MNL_CB_ERROR;
+	}
 	cmd = netlink_msg2cmd(type, nlh->nlmsg_flags);
 
 	switch (monh->format) {
@@ -363,7 +380,7 @@ static bool set_elem_is_open_interval(struct expr *elem)
 {
 	switch (elem->etype) {
 	case EXPR_SET_ELEM:
-		return elem->elem_flags & NFTNL_SET_ELEM_F_INTERVAL_OPEN;
+		return elem->flags & EXPR_F_INTERVAL_OPEN;
 	case EXPR_MAPPING:
 		return set_elem_is_open_interval(elem->left);
 	default:
@@ -383,13 +400,13 @@ static bool netlink_event_range_cache(struct set *cached_set,
 
 	/* if cache exists, dummyset must contain the other end of the range */
 	if (cached_set->rg_cache) {
-		compound_expr_add(dummyset->init, cached_set->rg_cache);
+		set_expr_add(dummyset->init, cached_set->rg_cache);
 		cached_set->rg_cache = NULL;
 		goto out_decompose;
 	}
 
 	/* don't cache half-open range elements */
-	elem = list_entry(dummyset->init->expressions.prev, struct expr, list);
+	elem = list_entry(expr_set(dummyset->init)->expressions.prev, struct expr, list);
 	if (!set_elem_is_open_interval(elem) &&
 	    dummyset->desc.field_count <= 1) {
 		cached_set->rg_cache = expr_clone(elem);
@@ -456,8 +473,8 @@ static int netlink_events_setelem_cb(const struct nlmsghdr *nlh, int type,
 			nftnl_set_elems_iter_destroy(nlsei);
 			goto out;
 		}
-		if (netlink_delinearize_setelem(nlse, dummyset,
-						&monh->ctx->nft->cache) < 0) {
+		if (netlink_delinearize_setelem(monh->ctx,
+						nlse, dummyset) < 0) {
 			set_free(dummyset);
 			nftnl_set_elems_iter_destroy(nlsei);
 			goto out;
@@ -532,13 +549,61 @@ static int netlink_events_obj_cb(const struct nlmsghdr *nlh, int type,
 		nft_mon_print(monh, "\n");
 		break;
 	case NFTNL_OUTPUT_JSON:
-		monitor_print_obj_json(monh, cmd, obj);
+		monitor_print_obj_json(monh, cmd, obj, type == NFT_MSG_DELOBJ);
 		if (!nft_output_echo(&monh->ctx->nft->output))
 			nft_mon_print(monh, "\n");
 		break;
 	}
 	obj_free(obj);
 	nftnl_obj_free(nlo);
+	return MNL_CB_OK;
+}
+
+static int netlink_events_flowtable_cb(const struct nlmsghdr *nlh, int type,
+				       struct netlink_mon_handler *monh)
+{
+	const char *family, *cmd;
+	struct nftnl_flowtable *nlf;
+	struct flowtable *ft;
+
+	nlf = netlink_flowtable_alloc(nlh);
+
+	ft = netlink_delinearize_flowtable(monh->ctx, nlf);
+	if (!ft) {
+		nftnl_flowtable_free(nlf);
+		return MNL_CB_ERROR;
+	}
+	family = family2str(ft->handle.family);
+	cmd = netlink_msg2cmd(type, nlh->nlmsg_flags);
+
+	switch (monh->format) {
+	case NFTNL_OUTPUT_DEFAULT:
+		nft_mon_print(monh, "%s ", cmd);
+
+		switch (type) {
+		case NFT_MSG_DELFLOWTABLE:
+			if (!ft->dev_array_len) {
+				nft_mon_print(monh, "flowtable %s %s %s",
+					      family,
+					      ft->handle.table.name,
+					      ft->handle.flowtable.name);
+				break;
+			}
+			/* fall through */
+		case NFT_MSG_NEWFLOWTABLE:
+			flowtable_print_plain(ft, &monh->ctx->nft->output);
+			break;
+		}
+		nft_mon_print(monh, "\n");
+		break;
+	case NFTNL_OUTPUT_JSON:
+		monitor_print_flowtable_json(monh, cmd, ft);
+		if (!nft_output_echo(&monh->ctx->nft->output))
+			nft_mon_print(monh, "\n");
+		break;
+	}
+	flowtable_free(ft);
+	nftnl_flowtable_free(nlf);
 	return MNL_CB_OK;
 }
 
@@ -714,8 +779,7 @@ static void netlink_events_cache_addsetelem(struct netlink_mon_handler *monh,
 
 	nlse = nftnl_set_elems_iter_next(nlsei);
 	while (nlse != NULL) {
-		if (netlink_delinearize_setelem(nlse, set,
-						&monh->ctx->nft->cache) < 0) {
+		if (netlink_delinearize_setelem(monh->ctx, nlse, set) < 0) {
 			fprintf(stderr,
 				"W: Unable to cache set_elem. "
 				"Delinearize failed.\n");
@@ -961,6 +1025,10 @@ static int netlink_events_cb(const struct nlmsghdr *nlh, void *data)
 	case NFT_MSG_NEWOBJ:
 	case NFT_MSG_DELOBJ:
 		ret = netlink_events_obj_cb(nlh, type, monh);
+		break;
+	case NFT_MSG_NEWFLOWTABLE:
+	case NFT_MSG_DELFLOWTABLE:
+		ret = netlink_events_flowtable_cb(nlh, type, monh);
 		break;
 	case NFT_MSG_NEWGEN:
 		ret = netlink_events_newgen_cb(nlh, type, monh);

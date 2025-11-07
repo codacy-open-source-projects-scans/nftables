@@ -218,6 +218,14 @@ meta hour "17:00:00" drop;ok;meta hour "17:00" drop
 meta hour "17:00:01" drop;ok
 meta hour "00:00" drop;ok
 meta hour "00:01" drop;ok
+meta hour "01:01" drop;ok
+meta hour "02:02" drop;ok
+meta hour "03:03" drop;ok
+meta hour "23:59:60" drop;ok;meta hour "00:00" drop
+meta hour "00:00"-"02:02" drop;ok
+meta hour "01:01"-"03:03" drop;ok
+meta hour "02:02"-"04:04" drop;ok
+meta hour "21:00"-"02:00" drop;ok
 time < "2022-07-01 11:00:00" accept;ok;meta time < "2022-07-01 11:00:00" accept
 time > "2022-07-01 11:00:00" accept;ok;meta time > "2022-07-01 11:00:00" accept
 
@@ -228,3 +236,5 @@ meta day 7 drop;fail
 meta mark set vlan id map { 1 : 0x00000001, 4095 : 0x00004095 };ok
 !map1 typeof vlan id : meta mark;ok
 meta mark set vlan id map @map1;ok
+
+meta mark set meta mark | iif | meta cpu;ok
