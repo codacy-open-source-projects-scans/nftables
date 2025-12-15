@@ -1,5 +1,5 @@
-AC_INIT([nftables], [1.1.5], [netfilter-devel@vger.kernel.org])
-AC_DEFINE([RELEASE_NAME], ["Commodore Bullmoose #6"], [Release name])
+AC_INIT([nftables], [1.1.6], [netfilter-devel@vger.kernel.org])
+AC_DEFINE([RELEASE_NAME], ["Commodore Bullmoose #7"], [Release name])
 
 AC_CONFIG_AUX_DIR([build-aux])
 AC_CONFIG_MACRO_DIR([m4])
@@ -57,7 +57,7 @@ AS_IF([test "x$enable_man_doc" = "xyes"], [
 ])
 
 PKG_CHECK_MODULES([LIBMNL], [libmnl >= 1.0.4])
-PKG_CHECK_MODULES([LIBNFTNL], [libnftnl >= 1.3.0])
+PKG_CHECK_MODULES([LIBNFTNL], [libnftnl >= 1.3.1])
 
 AC_ARG_WITH([mini-gmp], [AS_HELP_STRING([--with-mini-gmp],
             [Use builtin mini-gmp (for embedded builds)])],
@@ -157,7 +157,7 @@ AC_CONFIG_COMMANDS([nftversion.h], [
 	echo "	${STABLE_RELEASE}"
 	echo "};"
 	echo "static char nftbuildstamp[[]] = {"
-	for ((i = 56; i >= 0; i-= 8)); do
+	for i in `seq 56 -8 0`; do
 		echo "	((uint64_t)MAKE_STAMP >> $i) & 0xff,"
 	done
 	echo "};"
