@@ -219,6 +219,7 @@ addrstring	({macaddr}|{ip4addr}|{ip6addr})
 %s SCANSTATE_META
 %s SCANSTATE_POLICY
 %s SCANSTATE_QUOTA
+%x SCANSTATE_RATE
 %s SCANSTATE_SCTP
 %s SCANSTATE_SECMARK
 %s SCANSTATE_TCP
@@ -275,12 +276,12 @@ addrstring	({macaddr}|{ip4addr}|{ip6addr})
 "ge"			{ return GTE; }
 ">"			{ return GT; }
 "gt"			{ return GT; }
-","			{ return COMMA; }
+<*>","			{ return COMMA; }
 "."			{ return DOT; }
 ":"			{ return COLON; }
-";"			{ return SEMICOLON; }
+<*>";"			{ return SEMICOLON; }
 "{"			{ return '{'; }
-"}"			{ return '}'; }
+<*>"}"			{ return '}'; }
 "["			{ return '['; }
 "]"			{ return ']'; }
 "("			{ return '('; }
@@ -297,7 +298,7 @@ addrstring	({macaddr}|{ip4addr}|{ip6addr})
 "or"			{ return '|'; }
 "!"			{ return NOT; }
 "not"			{ return NOT; }
-"/"			{ return SLASH; }
+<*>"/"			{ return SLASH; }
 "-"			{ return DASH; }
 "*"			{ return ASTERISK; }
 "@"			{ scanner_push_start_cond(yyscanner, SCANSTATE_AT); return AT; }
@@ -322,6 +323,8 @@ addrstring	({macaddr}|{ip4addr}|{ip6addr})
 <SCANSTATE_CMD_MONITOR>{
 	"rules"			{ return RULES; }
 	"trace"			{ return TRACE; }
+	"new"			{ return NEW; }
+	"destroy"		{ return DESTROY; }
 }
 "hook"			{ return HOOK; }
 "device"		{ return DEVICE; }
@@ -408,10 +411,12 @@ addrstring	({macaddr}|{ip4addr}|{ip6addr})
 	"hooks"			{ return HOOKS; }
 }
 
-"counter"		{ scanner_push_start_cond(yyscanner, SCANSTATE_COUNTER); return COUNTER; }
+<*>"counter"		{ scanner_push_start_cond(yyscanner, SCANSTATE_COUNTER); return COUNTER; }
 <SCANSTATE_COUNTER,SCANSTATE_LIMIT,SCANSTATE_QUOTA,SCANSTATE_STMT_SYNPROXY,SCANSTATE_EXPR_OSF,SCANSTATE_TUNNEL>"name"			{ return NAME; }
-<SCANSTATE_COUNTER,SCANSTATE_CT,SCANSTATE_LIMIT>"packets"		{ return PACKETS; }
-<SCANSTATE_COUNTER,SCANSTATE_CT,SCANSTATE_LIMIT,SCANSTATE_QUOTA>"bytes"	{ return BYTES; }
+<SCANSTATE_COUNTER,SCANSTATE_CT,SCANSTATE_LIMIT,SCANSTATE_RATE>"packets"		{ return PACKETS; }
+<SCANSTATE_COUNTER,SCANSTATE_CT,SCANSTATE_LIMIT,SCANSTATE_QUOTA,SCANSTATE_RATE>"bytes"	{ return BYTES; }
+<SCANSTATE_LIMIT,SCANSTATE_QUOTA,SCANSTATE_RATE>"kbytes"	{ return KBYTES; }
+<SCANSTATE_LIMIT,SCANSTATE_QUOTA,SCANSTATE_RATE>"mbytes"	{ return MBYTES; }
 
 "last"				{ scanner_push_start_cond(yyscanner, SCANSTATE_LAST); return LAST; }
 <SCANSTATE_LAST>{
@@ -424,13 +429,22 @@ addrstring	({macaddr}|{ip4addr}|{ip6addr})
 	"rules"			{ return RULES; }
 }
 
-"log"			{ scanner_push_start_cond(yyscanner, SCANSTATE_STMT_LOG); return LOG; }
+<*>"log"			{ scanner_push_start_cond(yyscanner, SCANSTATE_STMT_LOG); return LOG; }
 <SCANSTATE_STMT_LOG,SCANSTATE_STMT_NAT,SCANSTATE_IP,SCANSTATE_IP6>"prefix"		{ return PREFIX; }
 <SCANSTATE_STMT_LOG>{
 	"snaplen"		{ return SNAPLEN; }
 	"queue-threshold"	{ return QUEUE_THRESHOLD; }
 	"level"			{ return LEVEL; }
 	"group"			{ return GROUP; }
+	"emerg"			{ return EMERG; }
+	"alert"			{ return ALERT; }
+	"crit"			{ return CRIT; }
+	"err"			{ return ERR; }
+	"warn"			{ return WARN; }
+	"notice"		{ return NOTICE; }
+	"info"			{ return INFO; }
+	"debug"			{ return DEBUG_TOKEN; }
+	"audit"			{ return AUDIT; }
 }
 
 "queue"			{ scanner_push_start_cond(yyscanner, SCANSTATE_EXPR_QUEUE); return QUEUE;}
@@ -440,8 +454,8 @@ addrstring	({macaddr}|{ip4addr}|{ip6addr})
 	"fanout"	{ return FANOUT;}
 }
 "limit"			{ scanner_push_start_cond(yyscanner, SCANSTATE_LIMIT); return LIMIT; }
-<SCANSTATE_LIMIT>{
-	"rate"			{ return RATE; }
+<SCANSTATE_LIMIT,SCANSTATE_RATE>{
+	"rate"			{ scanner_push_start_cond(yyscanner, SCANSTATE_RATE); return RATE; }
 	"burst"			{ return BURST; }
 
 	/* time_unit */
@@ -449,17 +463,17 @@ addrstring	({macaddr}|{ip4addr}|{ip6addr})
 	"minute"		{ return MINUTE; }
 	"week"			{ return WEEK; }
 }
-<SCANSTATE_CT,SCANSTATE_LIMIT,SCANSTATE_QUOTA>"over"		{ return OVER; }
+<SCANSTATE_CT,SCANSTATE_LIMIT,SCANSTATE_QUOTA,SCANSTATE_RATE>"over"		{ return OVER; }
 
 "quota"			{ scanner_push_start_cond(yyscanner, SCANSTATE_QUOTA); return QUOTA; }
-<SCANSTATE_QUOTA>{
+<SCANSTATE_QUOTA,SCANSTATE_RATE>{
 	"until"		{ return UNTIL; }
 }
 
 <SCANSTATE_QUOTA,SCANSTATE_LAST>"used"		{ return USED; }
 
-"hour"			{ return HOUR; }
-"day"			{ return DAY; }
+<*>"hour"		{ return HOUR; }
+<*>"day"		{ return DAY; }
 
 "reject"		{ scanner_push_start_cond(yyscanner, SCANSTATE_STMT_REJECT); return _REJECT; }
 <SCANSTATE_STMT_REJECT>{
@@ -531,6 +545,12 @@ addrstring	({macaddr}|{ip4addr}|{ip6addr})
 <SCANSTATE_EXPR_OSF,SCANSTATE_IP>{
 	"ttl"			{ return TTL; }
 }
+
+<SCANSTATE_EXPR_OSF>{
+	"loose"			{ return LOOSE; }
+	"skip"			{ return SKIP; }
+}
+
 <SCANSTATE_CT,SCANSTATE_IP,SCANSTATE_META,SCANSTATE_TYPE,SCANSTATE_GRE>"protocol"		{ return PROTOCOL; }
 <SCANSTATE_EXPR_MH,SCANSTATE_EXPR_UDP,SCANSTATE_EXPR_UDPLITE,SCANSTATE_ICMP,SCANSTATE_IGMP,SCANSTATE_IP,SCANSTATE_SCTP,SCANSTATE_TCP>{
 	"checksum"		{ return CHECKSUM; }
@@ -734,15 +754,30 @@ addrstring	({macaddr}|{ip4addr}|{ip6addr})
 "skgid"			{ return SKGID; }
 "nftrace"		{ return NFTRACE; }
 "rtclassid"		{ return RTCLASSID; }
-"ibriport"		{ return IBRIPORT; }
+"ibriport"		{ return IBRIDGENAME; } /* backwards compat */
 "ibrname"		{ return IBRIDGENAME; }
-"obriport"		{ return OBRIPORT; }
+"obriport"		{ return OBRIDGENAME; }	/* backwards compat */
 "obrname"		{ return OBRIDGENAME; }
 "pkttype"		{ return PKTTYPE; }
 "cpu"			{ return CPU; }
 "iifgroup"		{ return IIFGROUP; }
 "oifgroup"		{ return OIFGROUP; }
 "cgroup"		{ return CGROUP; }
+<SCANSTATE_META>{
+	"nfproto"	{ return NFPROTO; }
+	"l4proto"	{ return L4PROTO; }
+	"iifkind"	{ return IIFKIND; }
+	"oifkind"	{ return OIFKIND; }
+	"ibrpvid"	{ return IBRPVID; }
+	"ibrvproto"	{ return IBRVPROTO; }
+	"sdif"		{ return SDIF; }
+	"sdifname"	{ return SDIFNAME; }
+	"broute"	{ return BROUTE; }
+	"ibrhwaddr"	{ return BRIFHWADDR; }
+
+	/* backwards compat */
+	"secpath"	{ scanner_push_start_cond(yyscanner, SCANSTATE_EXPR_IPSEC); return IPSEC; }
+}
 
 <SCANSTATE_EXPR_RT>{
 	"nexthop"		{ return NEXTHOP; }
@@ -856,6 +891,12 @@ addrstring	({macaddr}|{ip4addr}|{ip6addr})
 	"out"			{ return OUT; }
 }
 
+<SCANSTATE_TYPE>{
+	"filter"		{ return FILTER; }
+	"nat"			{ return NAT; }
+	"route"			{ return ROUTE; }
+}
+
 "secmark"		{ scanner_push_start_cond(yyscanner, SCANSTATE_SECMARK); return SECMARK; }
 
 "xt"			{ scanner_push_start_cond(yyscanner, SCANSTATE_XT); return XT; }
@@ -876,7 +917,7 @@ addrstring	({macaddr}|{ip4addr}|{ip6addr})
 				return STRING;
 			}
 
-{hexstring}		{
+<*>{hexstring}		{
 				errno = 0;
 				yylval->val = strtoull(yytext, NULL, 16);
 				if (errno != 0) {
@@ -886,7 +927,7 @@ addrstring	({macaddr}|{ip4addr}|{ip6addr})
 				return NUM;
 			}
 
-{decstring}		{
+<*>{decstring}		{
 				int base = yytext[0] == '0' ? 8 : 10;
 				char *end;
 
@@ -920,32 +961,32 @@ addrstring	({macaddr}|{ip4addr}|{ip6addr})
 				return STRING;
 			}
 
-{newline_crlf}		{	return CRLF; }
+<*>{newline_crlf}	{	return CRLF; }
 
-\\{newline}		{
+<*>\\{newline}		{
 				reset_pos(yyget_extra(yyscanner), yylloc);
 			}
 
-{newline}		{
+<*>{newline}		{
 				reset_pos(yyget_extra(yyscanner), yylloc);
 				return NEWLINE;
 			}
 
-{tab}+
-{space}+
-{comment_line}		{
+<*>{tab}+
+<*>{space}+
+<*>{comment_line}	{
 				reset_pos(yyget_extra(yyscanner), yylloc);
 			}
-{comment}
+<*>{comment}
 
-<<EOF>> 		{
+<*><<EOF>> 		{
 				update_pos(yyget_extra(yyscanner), yylloc, 1);
 				scanner_pop_buffer(yyscanner);
 				if (YY_CURRENT_BUFFER == NULL)
 					return TOKEN_EOF;
 			}
 
-.			{ return JUNK; }
+<*>.			{ return JUNK; }
 
 %%
 

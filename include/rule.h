@@ -260,7 +260,6 @@ struct chain {
 
 #define STD_PRIO_BUFSIZE 100
 extern int std_prio_lookup(const char *std_prio_name, int family, int hook);
-extern const char *chain_type_name_lookup(const char *name);
 extern const char *chain_hookname_lookup(const char *name);
 extern struct chain *chain_alloc(void);
 extern struct chain *chain_get(struct chain *chain);
@@ -739,15 +738,23 @@ enum {
 	CMD_MONITOR_OBJ_MAX
 };
 
+enum cmd_monitor_event {
+	CMD_MONITOR_EVENT_ANY,
+	CMD_MONITOR_EVENT_NEW,
+	CMD_MONITOR_EVENT_DEL
+};
+#define CMD_MONITOR_EVENT_MAX	(CMD_MONITOR_EVENT_DEL + 1)
+
 struct monitor {
-	struct location	location;
-	uint32_t	format;
-	uint32_t	flags;
-	uint32_t	type;
-	const char	*event;
+	struct location		location;
+	uint32_t		format;
+	uint32_t		flags;
+	uint32_t		type;
+	enum cmd_monitor_event	event;
 };
 
-struct monitor *monitor_alloc(uint32_t format, uint32_t type, const char *event);
+struct monitor *monitor_alloc(uint32_t format, uint32_t type,
+			      enum cmd_monitor_event event);
 void monitor_free(struct monitor *m);
 
 #define NFT_NLATTR_LOC_MAX 32
