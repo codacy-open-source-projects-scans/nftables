@@ -139,17 +139,22 @@ struct nftnl_set_elem *alloc_nftnl_setelem(const struct expr *set,
 			netlink_gen_key(key, &nld);
 			key->flags &= ~EXPR_F_INTERVAL;
 
-			nftnl_set_elem_set(nlse, NFTNL_SET_ELEM_KEY, nld.value, nld.len);
+			nftnl_set_elem_set_imm(nlse, NFTNL_SET_ELEM_KEY,
+					       nld.value, nld.len,
+					       nld.byteorder, nld.sizes);
 
 			key->flags |= EXPR_F_INTERVAL_END;
 			netlink_gen_key(key, &nld);
 			key->flags &= ~EXPR_F_INTERVAL_END;
 
-			nftnl_set_elem_set(nlse, NFTNL_SET_ELEM_KEY_END,
-					   nld.value, nld.len);
+			nftnl_set_elem_set_imm(nlse, NFTNL_SET_ELEM_KEY_END,
+					       nld.value, nld.len,
+					       nld.byteorder, nld.sizes);
 		} else {
 			netlink_gen_key(key, &nld);
-			nftnl_set_elem_set(nlse, NFTNL_SET_ELEM_KEY, nld.value, nld.len);
+			nftnl_set_elem_set_imm(nlse, NFTNL_SET_ELEM_KEY,
+					       nld.value, nld.len,
+					       nld.byteorder, nld.sizes);
 		}
 		break;
 	}
@@ -217,8 +222,9 @@ struct nftnl_set_elem *alloc_nftnl_setelem(const struct expr *set,
 		case EXPR_RANGE:
 		case EXPR_RANGE_VALUE:
 		case EXPR_PREFIX:
-			nftnl_set_elem_set(nlse, NFTNL_SET_ELEM_DATA,
-					   nld.value, nld.len);
+			nftnl_set_elem_set_imm(nlse, NFTNL_SET_ELEM_DATA,
+					       nld.value, nld.len,
+					       nld.byteorder, nld.sizes);
 			break;
 		default:
 			BUG("unexpected set element expression");
@@ -248,6 +254,7 @@ void netlink_gen_raw_data(const mpz_t value, enum byteorder byteorder,
 	assert(len > 0);
 	mpz_export_data(data->value, value, byteorder, len);
 	data->len = len;
+	data->byteorder = byteorder == BYTEORDER_HOST_ENDIAN ? UINT32_MAX : 0;
 }
 
 static int netlink_export_pad(unsigned char *data, const mpz_t v,
@@ -265,11 +272,14 @@ static void byteorder_switch_expr_value(mpz_t v, const struct expr *e)
 }
 
 static int __netlink_gen_concat_key(uint32_t flags, const struct expr *i,
-				    unsigned char *data)
+				    unsigned char *data,
+				    enum byteorder *byteorder)
 {
 	struct expr *expr;
 	mpz_t value;
 	int ret;
+
+	*byteorder = i->byteorder;
 
 	switch (i->etype) {
 	case EXPR_RANGE:
@@ -281,8 +291,10 @@ static int __netlink_gen_concat_key(uint32_t flags, const struct expr *i,
 		mpz_init_set(value, expr->value);
 
 		if (expr_basetype(expr)->type == TYPE_INTEGER &&
-		    expr->byteorder == BYTEORDER_HOST_ENDIAN)
+		    expr->byteorder == BYTEORDER_HOST_ENDIAN) {
 			byteorder_switch_expr_value(value, expr);
+			*byteorder = BYTEORDER_BIG_ENDIAN;
+		}
 
 		i = expr;
 		break;
@@ -293,8 +305,10 @@ static int __netlink_gen_concat_key(uint32_t flags, const struct expr *i,
 			mpz_init_set(value, i->range.low);
 
 		if (expr_basetype(i)->type == TYPE_INTEGER &&
-		    i->byteorder == BYTEORDER_HOST_ENDIAN)
+		    i->byteorder == BYTEORDER_HOST_ENDIAN) {
 			byteorder_switch_expr_value(value, i);
+			*byteorder = BYTEORDER_BIG_ENDIAN;
+		}
 
 		break;
 	case EXPR_PREFIX:
@@ -304,8 +318,10 @@ static int __netlink_gen_concat_key(uint32_t flags, const struct expr *i,
 
 			mpz_init_bitmask(v, i->len - i->prefix_len);
 
-			if (i->byteorder == BYTEORDER_HOST_ENDIAN)
+			if (i->byteorder == BYTEORDER_HOST_ENDIAN) {
 				byteorder_switch_expr_value(v, i);
+				*byteorder = BYTEORDER_BIG_ENDIAN;
+			}
 
 			mpz_add(v, i->prefix->value, v);
 			count = netlink_export_pad(data, v, i);
@@ -323,9 +339,12 @@ static int __netlink_gen_concat_key(uint32_t flags, const struct expr *i,
 			break;
 
 		expr = (struct expr *)i;
+
 		if (expr_basetype(expr)->type == TYPE_INTEGER &&
-		    expr->byteorder == BYTEORDER_HOST_ENDIAN)
+		    expr->byteorder == BYTEORDER_HOST_ENDIAN) {
 			byteorder_switch_expr_value(value, expr);
+			*byteorder = BYTEORDER_BIG_ENDIAN;
+		}
 		break;
 	default:
 		BUG("invalid expression type '%s' in set", expr_ops(i)->name);
@@ -353,16 +372,24 @@ static void netlink_gen_concat_key(const struct expr *expr,
 {
 	unsigned int len = netlink_padded_len(expr->len) / BITS_PER_BYTE;
 	unsigned char data[NFT_MAX_EXPR_LEN_BYTES];
+	enum byteorder byteorder;
 	unsigned int offset = 0;
 	const struct expr *i;
+	int n = 0;
 
 	if (len > sizeof(data))
 		BUG("Value export of %u bytes would overflow", len);
 
 	memset(data, 0, sizeof(data));
 
-	list_for_each_entry(i, &expr_concat(expr)->expressions, list)
-		offset += __netlink_gen_concat_key(expr->flags, i, data + offset);
+	list_for_each_entry(i, &expr_concat(expr)->expressions, list) {
+		offset += __netlink_gen_concat_key(expr->flags, i,
+						   data + offset, &byteorder);
+		if (byteorder == BYTEORDER_HOST_ENDIAN &&
+		    expr_basetype(i)->type != TYPE_STRING)
+			nld->byteorder |= 1 << n;
+		nld->sizes[n++] = div_round_up(i->len, BITS_PER_BYTE);
+	}
 
 	nft_data_memcpy(nld, data, len);
 }
@@ -419,17 +446,28 @@ static void __netlink_gen_concat_expand(const struct expr *expr,
 	unsigned char data[NFT_MAX_EXPR_LEN_BYTES];
 	unsigned int offset = 0;
 	const struct expr *i;
+	int n = 0;
 
 	if (len > sizeof(data))
 		BUG("Value export of %u bytes would overflow", len);
 
 	memset(data, 0, sizeof(data));
 
-	list_for_each_entry(i, &expr_concat(expr)->expressions, list)
+	list_for_each_entry(i, &expr_concat(expr)->expressions, list) {
 		offset += __netlink_gen_concat_data(false, i, data + offset);
+		if (i->byteorder == BYTEORDER_HOST_ENDIAN &&
+		    expr_basetype(i)->type != TYPE_STRING)
+			nld->byteorder |= 1 << n;
+		nld->sizes[n++] = div_round_up(i->len, BITS_PER_BYTE);
+	}
 
-	list_for_each_entry(i, &expr_concat(expr)->expressions, list)
+	list_for_each_entry(i, &expr_concat(expr)->expressions, list) {
 		offset += __netlink_gen_concat_data(true, i, data + offset);
+		if (i->byteorder == BYTEORDER_HOST_ENDIAN &&
+		    expr_basetype(i)->type != TYPE_STRING)
+			nld->byteorder |= 1 << n;
+		nld->sizes[n++] = div_round_up(i->len, BITS_PER_BYTE);
+	}
 
 	nft_data_memcpy(nld, data, len);
 }
@@ -441,14 +479,20 @@ static void __netlink_gen_concat(const struct expr *expr,
 	unsigned char data[NFT_MAX_EXPR_LEN_BYTES];
 	unsigned int offset = 0;
 	const struct expr *i;
+	int n = 0;
 
 	if (len > sizeof(data))
 		BUG("Value export of %u bytes would overflow", len);
 
 	memset(data, 0, sizeof(data));
 
-	list_for_each_entry(i, &expr_concat(expr)->expressions, list)
+	list_for_each_entry(i, &expr_concat(expr)->expressions, list) {
 		offset += __netlink_gen_concat_data(expr->flags, i, data + offset);
+		if (i->byteorder == BYTEORDER_HOST_ENDIAN &&
+		    expr_basetype(i)->type != TYPE_STRING)
+			nld->byteorder |= 1 << n;
+		nld->sizes[n++] = div_round_up(i->len, BITS_PER_BYTE);
+	}
 
 	nft_data_memcpy(nld, data, len);
 }
@@ -468,6 +512,8 @@ static void netlink_gen_constant_data(const struct expr *expr,
 	assert(expr->etype == EXPR_VALUE);
 	netlink_gen_raw_data(expr->value, expr->byteorder,
 			     div_round_up(expr->len, BITS_PER_BYTE), data);
+	if (expr_basetype(expr)->type == TYPE_STRING)
+		data->byteorder = 0;
 }
 
 static void netlink_gen_chain(const struct expr *expr,
@@ -523,6 +569,8 @@ static void netlink_gen_range(const struct expr *expr,
 	offset = netlink_export_pad(data, expr->left->value, expr->left);
 	netlink_export_pad(data + offset, expr->right->value, expr->right);
 	nft_data_memcpy(nld, data, len);
+	nld->sizes[0] = div_round_up(expr->left->len, BITS_PER_BYTE);
+	nld->sizes[1] = div_round_up(expr->right->len, BITS_PER_BYTE);
 }
 
 static void netlink_gen_range_value(const struct expr *expr,
@@ -539,6 +587,8 @@ static void netlink_gen_range_value(const struct expr *expr,
 	offset = netlink_export_pad(data, expr->range.low, expr);
 	netlink_export_pad(data + offset, expr->range.high, expr);
 	nft_data_memcpy(nld, data, len);
+	nld->sizes[0] = div_round_up(expr->len, BITS_PER_BYTE);
+	nld->sizes[1] = nld->sizes[0];
 }
 
 static void netlink_gen_prefix(const struct expr *expr,
@@ -559,6 +609,8 @@ static void netlink_gen_prefix(const struct expr *expr,
 	mpz_clear(v);
 
 	nft_data_memcpy(nld, data, len);
+	nld->sizes[0] = div_round_up(expr->prefix->len, BITS_PER_BYTE);
+	nld->sizes[1] = nld->sizes[0];
 }
 
 static void netlink_gen_key(const struct expr *expr,
