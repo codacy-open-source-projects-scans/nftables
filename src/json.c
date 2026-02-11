@@ -232,8 +232,11 @@ static json_t *set_print_json(struct output_ctx *octx, const struct set *set)
 		json_t *array = json_array();
 		const struct expr *i;
 
-		list_for_each_entry(i, &expr_set(set->init)->expressions, list)
+		list_for_each_entry(i, &expr_set(set->init)->expressions, list) {
+			assert(i->etype == EXPR_SET_ELEM);
+
 			json_array_append_new(array, expr_print_json(i, octx));
+		}
 
 		json_object_set_new(root, "elem", array);
 	}
@@ -768,8 +771,11 @@ json_t *set_expr_json(const struct expr *expr, struct output_ctx *octx)
 	json_t *array = json_array();
 	const struct expr *i;
 
-	list_for_each_entry(i, &expr_set(expr)->expressions, list)
+	list_for_each_entry(i, &expr_set(expr)->expressions, list) {
+		assert(i->etype == EXPR_SET_ELEM);
+
 		json_array_append_new(array, expr_print_json(i, octx));
+	}
 
 	return nft_json_pack("{s:o}", "set", array);
 }
@@ -783,18 +789,19 @@ json_t *set_ref_expr_json(const struct expr *expr, struct output_ctx *octx)
 	}
 }
 
-json_t *set_elem_expr_json(const struct expr *expr, struct output_ctx *octx)
+static json_t *__set_elem_expr_json(const struct expr *expr,
+				    const struct expr *val,
+				    struct output_ctx *octx)
 {
-	json_t *root = expr_print_json(expr->key, octx);
+	json_t *root = expr_print_json(val, octx);
 	struct stmt *stmt;
 	json_t *tmp;
-
-	if (!root)
-		return NULL;
 
 	/* these element attributes require formal set elem syntax */
 	if (expr->timeout || expr->expiration || expr->comment ||
 	    !list_empty(&expr->stmt_list)) {
+		assert(expr->etype == EXPR_SET_ELEM);
+
 		root = nft_json_pack("{s:o}", "val", root);
 
 		if (expr->timeout) {
@@ -821,6 +828,27 @@ json_t *set_elem_expr_json(const struct expr *expr, struct output_ctx *octx)
 	}
 
 	return root;
+}
+
+json_t *set_elem_expr_json(const struct expr *expr, struct output_ctx *octx)
+{
+	json_t *left, *right;
+
+	assert(expr->etype == EXPR_SET_ELEM);
+
+	/* Special handling to retain backwards compatibility: json exposes
+	 * EXPR_MAPPING { left: EXPR_SET_ELEM, right: EXPR_{VALUE,CONCAT,SYMBOL}.
+	 * Revisit this at some point to accept the following input:
+	 * EXPR_SET_ELEM -> EXPR_MAPPING { left, right }
+	 */
+	if (expr->key->etype == EXPR_MAPPING) {
+		left = __set_elem_expr_json(expr, expr->key->left, octx);
+		right = expr_print_json(expr->key->right, octx);
+
+		return nft_json_pack("[o, o]", left, right);
+	}
+
+	return __set_elem_expr_json(expr, expr->key, octx);
 }
 
 json_t *prefix_expr_json(const struct expr *expr, struct output_ctx *octx)

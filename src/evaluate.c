@@ -1896,7 +1896,7 @@ static int __expr_evaluate_set_elem(struct eval_ctx *ctx, struct expr *elem)
 		struct stmt *set_stmt, *elem_stmt;
 
 		if (num_set_exprs > 0 && num_elem_exprs != num_set_exprs) {
-			return expr_error(ctx->msgs, elem,
+			return expr_error(ctx->msgs, elem->key,
 					  "number of statements mismatch, set expects %d "
 					  "but element has %d", num_set_exprs,
 					  num_elem_exprs);
@@ -1942,6 +1942,9 @@ static bool elem_key_compatible(const struct expr *set_key,
 	/* Catchall element is always compatible with the set key declaration */
 	if (expr_type_catchall(elem_key))
 		return true;
+
+	if (elem_key->etype == EXPR_MAPPING)
+		return datatype_compatible(set_key->dtype, elem_key->left->dtype);
 
 	return datatype_compatible(set_key->dtype, elem_key->dtype);
 }
@@ -1989,14 +1992,13 @@ static int expr_evaluate_set_elem(struct eval_ctx *ctx, struct expr **expr)
 	}
 
 	if (ctx->set && !elem_key_compatible(ctx->set->key, elem->key))
-		return expr_error(ctx->msgs, elem,
+		return expr_error(ctx->msgs, elem->key,
 				  "Element mismatches %s definition, expected %s, not '%s'",
 				  set_is_map(ctx->set->flags) ? "map" : "set",
 				  ctx->set->key->dtype->desc, elem->key->dtype->desc);
 
 	datatype_set(elem, elem->key->dtype);
 	elem->len   = elem->key->len;
-	elem->flags = elem->key->flags;
 
 	return 0;
 
@@ -2014,14 +2016,6 @@ static int expr_evaluate_set_elem_catchall(struct eval_ctx *ctx, struct expr **e
 		elem->len = ctx->set->key->len;
 
 	return 0;
-}
-
-static const struct expr *expr_set_elem(const struct expr *expr)
-{
-	if (expr->etype == EXPR_MAPPING)
-		return expr->left;
-
-	return expr;
 }
 
 static int interval_set_eval(struct eval_ctx *ctx, struct set *set,
@@ -2072,21 +2066,24 @@ static void expr_evaluate_set_ref(struct eval_ctx *ctx, struct expr *expr)
 static int expr_evaluate_set(struct eval_ctx *ctx, struct expr **expr)
 {
 	struct expr *set = *expr, *i, *next;
-	const struct expr *elem;
 
 	list_for_each_entry_safe(i, next, &expr_set(set)->expressions, list) {
+		assert(i->etype == EXPR_SET_ELEM);
+
 		if (list_member_evaluate(ctx, &i) < 0)
 			return -1;
 
-		if (i->etype == EXPR_MAPPING &&
-		    i->left->etype == EXPR_SET_ELEM &&
-		    i->left->key->etype == EXPR_SET) {
+		if (i->key->etype == EXPR_MAPPING &&
+		    i->key->left->etype == EXPR_SET) {
 			struct expr *new, *j;
 
-			list_for_each_entry(j, &expr_set(i->left->key)->expressions, list) {
+			list_for_each_entry(j, &expr_set(i->key->left)->expressions, list) {
+				assert(j->etype == EXPR_SET_ELEM);
+
 				new = mapping_expr_alloc(&i->location,
-							 expr_get(j),
-							 expr_get(i->right));
+							 expr_get(j->key),
+							 expr_get(i->key->right));
+				new = set_elem_expr_alloc(&i->location, new);
 				list_add_tail(&new->list, &expr_set(set)->expressions);
 				expr_set(set)->size++;
 			}
@@ -2095,38 +2092,26 @@ static int expr_evaluate_set(struct eval_ctx *ctx, struct expr **expr)
 			continue;
 		}
 
-		elem = expr_set_elem(i);
-
-		if (elem->etype == EXPR_SET_ELEM &&
-		    elem->key->etype == EXPR_SET_REF)
-			return expr_error(ctx->msgs, i,
+		if (i->key->etype == EXPR_SET_REF)
+			return expr_error(ctx->msgs, i->key,
 					  "Set reference cannot be part of another set");
 
-		if (elem->etype == EXPR_SET_ELEM &&
-		    elem->key->etype == EXPR_SET) {
-			struct expr *new = expr_get(elem->key);
-
-			expr_set(set)->set_flags |= expr_set(elem->key)->set_flags;
-			list_replace(&i->list, &new->list);
-			expr_free(i);
-			i = new;
-			elem = expr_set_elem(i);
-		}
-
-		if (!expr_is_constant(i))
-			return expr_error(ctx->msgs, i,
+		if (!expr_is_constant(i->key))
+			return expr_error(ctx->msgs, i->key,
 					  "Set member is not constant");
 
-		if (i->etype == EXPR_SET) {
+		if (i->key->etype == EXPR_SET) {
 			/* Merge recursive set definitions */
-			list_splice_tail_init(&expr_set(i)->expressions, &i->list);
+			list_splice_tail_init(&expr_set(i->key)->expressions, &i->list);
 			list_del(&i->list);
-			expr_set(set)->size      += expr_set(i)->size - 1;
-			expr_set(set)->set_flags |= expr_set(i)->set_flags;
+			expr_set(set)->size      += expr_set(i->key)->size - 1;
+			expr_set(set)->set_flags |= expr_set(i->key)->set_flags;
 			expr_free(i);
-		} else if (!expr_is_singleton(i)) {
+		} else if (!expr_is_singleton(i->key)) {
 			expr_set(set)->set_flags |= NFT_SET_INTERVAL;
-			if (elem->key->etype == EXPR_CONCAT)
+			if ((i->key->etype == EXPR_MAPPING &&
+			     i->key->left->etype == EXPR_CONCAT) ||
+			    i->key->etype == EXPR_CONCAT)
 				expr_set(set)->set_flags |= NFT_SET_CONCAT;
 		}
 	}
@@ -2197,10 +2182,12 @@ static int mapping_expr_expand(struct eval_ctx *ctx)
 		return 0;
 
 	list_for_each_entry(i, &expr_set(ctx->set->init)->expressions, list) {
-		if (i->etype != EXPR_MAPPING)
+		assert(i->etype == EXPR_SET_ELEM);
+
+		if (i->key->etype != EXPR_MAPPING)
 			return expr_error(ctx->msgs, i,
 					  "expected mapping, not %s", expr_name(i));
-		__mapping_expr_expand(i);
+		__mapping_expr_expand(i->key);
 	}
 
 	return 0;
@@ -2389,6 +2376,7 @@ static bool elem_data_compatible(const struct expr *set_data,
 
 static int expr_evaluate_mapping(struct eval_ctx *ctx, struct expr **expr)
 {
+	const struct expr *key = ctx->ectx.key;
 	struct expr *mapping = *expr;
 	struct set *set = ctx->set;
 	uint32_t datalen;
@@ -2400,6 +2388,8 @@ static int expr_evaluate_mapping(struct eval_ctx *ctx, struct expr **expr)
 		return set_error(ctx, set, "set is not a map");
 
 	expr_set_context(&ctx->ectx, set->key->dtype, set->key->len);
+	ctx->ectx.key = key;
+
 	if (expr_evaluate(ctx, &mapping->left) < 0)
 		return -1;
 	if (!expr_is_constant(mapping->left))
@@ -2702,11 +2692,15 @@ static int __binop_transfer(struct eval_ctx *ctx,
 		break;
 	case EXPR_SET:
 		list_for_each_entry(i, &expr_set(*right)->expressions, list) {
+			assert(i->etype == EXPR_SET_ELEM);
+
 			err = binop_can_transfer(ctx, left, i);
 			if (err <= 0)
 				return err;
 		}
 		list_for_each_entry_safe(i, next, &expr_set(*right)->expressions, list) {
+			assert(i->etype == EXPR_SET_ELEM);
+
 			list_del(&i->list);
 			err = binop_transfer_one(ctx, left, &i);
 			list_add_tail(&i->list, &next->list);
@@ -2773,9 +2767,9 @@ static void optimize_singleton_set(struct expr *rel, struct expr **expr)
 	struct expr *set = rel->right, *i;
 
 	i = list_first_entry(&expr_set(set)->expressions, struct expr, list);
-	if (i->etype == EXPR_SET_ELEM &&
-	    list_empty(&i->stmt_list)) {
+	assert (i->etype == EXPR_SET_ELEM);
 
+	if (list_empty(&i->stmt_list)) {
 		switch (i->key->etype) {
 		case EXPR_PREFIX:
 		case EXPR_RANGE:
@@ -3679,28 +3673,28 @@ static int stmt_evaluate_meter(struct eval_ctx *ctx, struct stmt *stmt)
 	expr_set_context(&ctx->ectx, NULL, 0);
 	if (expr_evaluate(ctx, &stmt->meter.key) < 0)
 		return -1;
-	if (expr_is_constant(stmt->meter.key))
-		return expr_error(ctx->msgs, stmt->meter.key,
+	if (expr_is_constant(stmt->meter.key->key))
+		return expr_error(ctx->msgs, stmt->meter.key->key,
 				  "Meter key expression can not be constant");
 	if (stmt->meter.key->comment)
-		return expr_error(ctx->msgs, stmt->meter.key,
+		return expr_error(ctx->msgs, stmt->meter.key->key,
 				  "Meter key expression can not contain comments");
 
 	/* Declare an empty set */
 	key = stmt->meter.key;
 	if (existing_set) {
 		if ((existing_set->flags & NFT_SET_TIMEOUT) && !key->timeout)
-			return expr_error(ctx->msgs, stmt->meter.key,
+			return expr_error(ctx->msgs, stmt->meter.key->key,
 					  "existing set '%s' has timeout flag",
 					  stmt->meter.name);
 
 		if ((existing_set->flags & NFT_SET_TIMEOUT) == 0 && key->timeout)
-			return expr_error(ctx->msgs, stmt->meter.key,
+			return expr_error(ctx->msgs, stmt->meter.key->key,
 					  "existing set '%s' lacks timeout flag",
 					  stmt->meter.name);
 
 		if (stmt->meter.size > 0 && existing_set->desc.size != stmt->meter.size)
-			return expr_error(ctx->msgs, stmt->meter.key,
+			return expr_error(ctx->msgs, stmt->meter.key->key,
 					  "existing set '%s' has size %u, meter has %u",
 					  stmt->meter.name, existing_set->desc.size,
 					  stmt->meter.size);
@@ -4475,8 +4469,10 @@ static bool nat_concat_map(struct eval_ctx *ctx, struct stmt *stmt)
 	switch (stmt->nat.addr->mappings->etype) {
 	case EXPR_SET:
 		list_for_each_entry(i, &expr_set(stmt->nat.addr->mappings)->expressions, list) {
-			if (i->etype == EXPR_MAPPING &&
-			    i->right->etype == EXPR_CONCAT) {
+			assert(i->etype == EXPR_SET_ELEM);
+
+			if (i->key->etype == EXPR_MAPPING &&
+			    i->key->right->etype == EXPR_CONCAT) {
 				stmt->nat.type_flags |= STMT_NAT_F_CONCAT;
 				return true;
 			}
@@ -4851,11 +4847,8 @@ static int stmt_evaluate_set(struct eval_ctx *ctx, struct stmt *stmt)
 			      stmt->set.set->set->key->byteorder,
 			      &stmt->set.key->key) < 0)
 		return -1;
-	if (expr_is_constant(stmt->set.key))
-		return expr_error(ctx->msgs, stmt->set.key,
-				  "Key expression can not be constant");
 	if (stmt->set.key->comment != NULL)
-		return expr_error(ctx->msgs, stmt->set.key,
+		return expr_error(ctx->msgs, stmt->set.key->key,
 				  "Key expression comments are not supported");
 	list_for_each_entry(this, &stmt->set.stmt_list, list) {
 		if (stmt_evaluate_stateful(ctx, this, "set") < 0)
@@ -4895,11 +4888,8 @@ static int stmt_evaluate_map(struct eval_ctx *ctx, struct stmt *stmt)
 			      stmt->map.set->set->key->byteorder,
 			      &stmt->map.key->key) < 0)
 		return -1;
-	if (expr_is_constant(stmt->map.key))
-		return expr_error(ctx->msgs, stmt->map.key,
-				  "Key expression can not be constant");
 	if (stmt->map.key->comment != NULL)
-		return expr_error(ctx->msgs, stmt->map.key,
+		return expr_error(ctx->msgs, stmt->map.key->key,
 				  "Key expression comments are not supported");
 
 	if (stmt_evaluate_arg(ctx, stmt,
@@ -4908,9 +4898,6 @@ static int stmt_evaluate_map(struct eval_ctx *ctx, struct stmt *stmt)
 			      stmt->map.set->set->data->byteorder,
 			      &stmt->map.data->key) < 0)
 		return -1;
-	if (expr_is_constant(stmt->map.data))
-		return expr_error(ctx->msgs, stmt->map.data,
-				  "Data expression can not be constant");
 	if (stmt->map.data->comment != NULL)
 		return expr_error(ctx->msgs, stmt->map.data,
 				  "Data expression comments are not supported");
@@ -5315,16 +5302,17 @@ static int set_evaluate(struct eval_ctx *ctx, struct set *set)
 	}
 
 	if (set_is_anonymous(set->flags) && set->key->etype == EXPR_CONCAT) {
-		struct expr *i;
+		struct expr *i, *key;
 
 		list_for_each_entry(i, &expr_set(set->init)->expressions, list) {
-			if ((i->etype == EXPR_SET_ELEM &&
-			     i->key->etype != EXPR_CONCAT &&
-			     i->key->etype != EXPR_SET_ELEM_CATCHALL) ||
-			    (i->etype == EXPR_MAPPING &&
-			     i->left->etype == EXPR_SET_ELEM &&
-			     i->left->key->etype != EXPR_CONCAT &&
-			     i->left->key->etype != EXPR_SET_ELEM_CATCHALL))
+			assert (i->etype == EXPR_SET_ELEM);
+
+			key = i->key;
+			if (key->etype == EXPR_MAPPING)
+				key = key->left;
+
+			if (key->etype != EXPR_CONCAT &&
+			    key->etype != EXPR_SET_ELEM_CATCHALL)
 				return expr_error(ctx->msgs, i, "expression is not a concatenation");
 		}
 	}
@@ -5477,19 +5465,12 @@ static struct expr *expr_set_to_list(struct eval_ctx *ctx, struct expr *dev_expr
 	LIST_HEAD(tmp);
 
 	list_for_each_entry_safe(expr, next, &expr_set(dev_expr)->expressions, list) {
+		assert(expr->etype == EXPR_SET_ELEM);
+
 		list_del(&expr->list);
-
-		switch (expr->etype) {
-		case EXPR_SET_ELEM:
-			key = expr_clone(expr->key);
-			expr_free(expr);
-			expr = key;
-			break;
-		default:
-			BUG("invalid expression type %s", expr_name(expr));
-			break;
-		}
-
+		key = expr_clone(expr->key);
+		expr_free(expr);
+		expr = key;
 		list_add(&expr->list, &tmp);
 	}
 
